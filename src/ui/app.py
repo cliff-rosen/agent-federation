@@ -8,14 +8,12 @@ from dataclasses import dataclass
 from textual.app import App, ComposeResult
 from textual.containers import Vertical, Container
 from textual.widgets import Header, Footer, Static, Input, RichLog, Label, ListView, ListItem
-from textual.reactive import reactive
 from textual.message import Message
 from textual import work
 from rich.text import Text
-from rich.panel import Panel
 
 from ..shared.events import Event, EventType
-from ..shared.types import WorkerStatus
+from ..shared.types import Worker, WorkerStatus
 
 if TYPE_CHECKING:
     from ..federation import Federation
@@ -39,7 +37,7 @@ class WorkerFilterChanged(Message):
 class WorkerListItem(ListItem):
     """A clickable worker item."""
 
-    def __init__(self, worker_id: str, worker, selected: bool = False) -> None:
+    def __init__(self, worker_id: str, worker: Worker, selected: bool = False) -> None:
         super().__init__()
         self.worker_id = worker_id
         self.worker = worker
@@ -65,44 +63,57 @@ class WorkerListItem(ListItem):
 class WorkersList(Static):
     """Shows all workers with their status. Click to filter output."""
 
-    workers: reactive[dict] = reactive({}, always_update=True)
-    selected_id: reactive[str | None] = reactive(None)
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._workers: dict[str, Worker] = {}
+        self._selected_id: str | None = None
+
+    @property
+    def workers(self) -> dict[str, Worker]:
+        return self._workers
+
+    @workers.setter
+    def workers(self, value: dict[str, Worker]) -> None:
+        self._workers = value
+        self._rebuild_list()
+
+    @property
+    def selected_id(self) -> str | None:
+        return self._selected_id
+
+    @selected_id.setter
+    def selected_id(self, value: str | None) -> None:
+        self._selected_id = value
+        self._rebuild_list()
 
     def compose(self) -> ComposeResult:
         yield ListView(id="workers-listview")
-
-    def watch_workers(self, workers: dict) -> None:
-        """Update the list when workers change."""
-        self._rebuild_list()
-
-    def watch_selected_id(self, selected_id: str | None) -> None:
-        """Update the list when selection changes."""
-        self._rebuild_list()
 
     def _rebuild_list(self) -> None:
         """Rebuild the worker list."""
         try:
             list_view = self.query_one("#workers-listview", ListView)
-            list_view.clear()
-
-            if not self.workers:
-                list_view.append(ListItem(Label("No workers yet", classes="dim")))
-                return
-
-            # Add "All workers" option
-            all_selected = self.selected_id is None
-            all_prefix = "▶ " if all_selected else "  "
-            all_item = ListItem(Label(f"{all_prefix}◉ ALL WORKERS", classes="bold" if all_selected else ""))
-            all_item.worker_id = None  # type: ignore
-            list_view.append(all_item)
-
-            # Add each worker
-            for worker_id, worker in self.workers.items():
-                is_selected = self.selected_id == worker_id
-                item = WorkerListItem(worker_id, worker, selected=is_selected)
-                list_view.append(item)
         except Exception:
-            pass  # Widget not ready
+            return  # Widget not mounted yet
+
+        list_view.clear()
+
+        if not self._workers:
+            list_view.append(ListItem(Label("No workers yet", classes="dim")))
+            return
+
+        # Add "All workers" option
+        all_selected = self._selected_id is None
+        all_prefix = "▶ " if all_selected else "  "
+        all_item = ListItem(Label(f"{all_prefix}◉ ALL WORKERS", classes="bold" if all_selected else ""))
+        all_item.worker_id = None  # type: ignore
+        list_view.append(all_item)
+
+        # Add each worker
+        for worker_id, worker in self._workers.items():
+            is_selected = self._selected_id == worker_id
+            item = WorkerListItem(worker_id, worker, selected=is_selected)
+            list_view.append(item)
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Handle worker selection."""
@@ -115,6 +126,62 @@ class WorkersList(Static):
             else:
                 self.selected_id = worker_id
             self.post_message(WorkerFilterChanged(self.selected_id))
+
+
+class WorkerDetails(Static):
+    """Shows detailed information about the selected worker."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._worker: Worker | None = None
+        self._worker_id: str | None = None
+
+    def set_worker(self, worker_id: str, worker: Worker) -> None:
+        """Update the displayed worker."""
+        self._worker_id = worker_id
+        self._worker = worker
+        self._refresh_display()
+
+    def clear_worker(self) -> None:
+        """Clear the worker display."""
+        self._worker = None
+        self._worker_id = None
+        self._refresh_display()
+
+    def _refresh_display(self) -> None:
+        """Rebuild the display."""
+        if self._worker is None:
+            self.update("[dim]Select a worker to see details[/dim]")
+            return
+
+        w = self._worker
+        lines = []
+
+        # Header with ID and type
+        status_icon = {"idle": "○", "working": "●", "done": "✓"}.get(w.status.value, "?")
+        status_color = {"idle": "dim", "working": "yellow", "done": "green"}.get(w.status.value, "white")
+        lines.append(f"[bold]{w.type}[/bold] [{status_color}]{status_icon} {w.status.value}[/{status_color}]")
+        lines.append(f"[dim]ID:[/dim] {self._worker_id}")
+
+        # Task
+        if w.current_task:
+            task_display = w.current_task[:80] + "..." if len(w.current_task) > 80 else w.current_task
+            lines.append(f"[dim]Task:[/dim] {task_display}")
+
+        # Intention
+        if w.intention:
+            lines.append(f"[dim]On complete:[/dim] {w.intention.value}")
+
+        # Tools
+        if w.config and w.config.allowed_tools:
+            tools = ", ".join(w.config.allowed_tools)
+            lines.append(f"[dim]Tools:[/dim] {tools}")
+
+        # Description from config
+        if w.config and w.config.description:
+            lines.append(f"[dim]Desc:[/dim] {w.config.description}")
+
+        self.update("\n".join(lines))
 
 
 class StreamingLog(RichLog):
@@ -147,33 +214,42 @@ class FederationApp(App):
     CSS = """
     Screen {
         layout: grid;
-        grid-size: 3 2;
+        grid-size: 3 1;
         grid-columns: 2fr 1fr 1fr;
-        grid-rows: 1fr auto;
     }
 
     /* Left column - Chat */
     #chat-area {
-        row-span: 2;
         border: solid green;
         padding: 0 1;
     }
 
-    /* Middle column - Workers list (top) */
+    /* Middle column - Workers, Details, Output */
+    #middle-area {
+        height: 100%;
+    }
+
     #workers-area {
         border: solid blue;
         padding: 0 1;
+        height: auto;
+        max-height: 30%;
     }
 
-    /* Middle column - Worker output (bottom) */
+    #worker-details-area {
+        border: solid cyan;
+        padding: 0 1;
+        height: auto;
+    }
+
     #worker-output-area {
         border: solid yellow;
         padding: 0 1;
+        height: 1fr;
     }
 
     /* Right column - Event log (full height) */
     #event-log-area {
-        row-span: 2;
         border: solid gray;
         padding: 0 1;
     }
@@ -201,6 +277,11 @@ class FederationApp(App):
 
     WorkersList {
         height: 100%;
+    }
+
+    #worker-details {
+        height: auto;
+        padding: 0;
     }
 
     .section-title {
@@ -237,15 +318,22 @@ class FederationApp(App):
             yield StreamingLog(id="chat-log", highlight=True, markup=True)
             yield Input(placeholder="Message to master...", id="chat-input")
 
-        # Middle top: Workers list (click to filter)
-        with Container(id="workers-area"):
-            yield Label("Workers (click to filter)", classes="section-title")
-            yield WorkersList(id="workers-list")
+        # Middle column: Workers, Details, Output
+        with Vertical(id="middle-area"):
+            # Workers list (click to filter)
+            with Container(id="workers-area"):
+                yield Label("Workers (click to filter)", classes="section-title")
+                yield WorkersList(id="workers-list")
 
-        # Middle bottom: Worker output
-        with Vertical(id="worker-output-area"):
-            yield Label("Worker Output", id="filter-label")
-            yield RichLog(id="worker-output", highlight=True, markup=True)
+            # Worker details
+            with Container(id="worker-details-area"):
+                yield Label("Worker Details", classes="section-title")
+                yield WorkerDetails(id="worker-details")
+
+            # Worker output
+            with Vertical(id="worker-output-area"):
+                yield Label("Worker Output", id="filter-label")
+                yield RichLog(id="worker-output", highlight=True, markup=True)
 
         # Right column: Event log
         with Vertical(id="event-log-area"):
@@ -263,10 +351,14 @@ class FederationApp(App):
         self.worker_output = self.query_one("#worker-output", RichLog)
         self.event_log = self.query_one("#event-log", RichLog)
         self.workers_list = self.query_one("#workers-list", WorkersList)
+        self.worker_details = self.query_one("#worker-details", WorkerDetails)
         self.filter_label = self.query_one("#filter-label", Label)
 
         # Subscribe to events
         self.federation.event_bus.subscribe(self.handle_event)
+
+        # Load initial workers
+        self._refresh_workers()
 
         self.chat_log.write(Text("Ready. Type a message to begin.", style="dim"))
 
@@ -274,6 +366,7 @@ class FederationApp(App):
         """Handle worker filter change."""
         self.filter_worker_id = message.worker_id
         self._update_filter_label()
+        self._update_worker_details()
         self._redraw_worker_output()
 
     def action_show_all_workers(self) -> None:
@@ -281,7 +374,17 @@ class FederationApp(App):
         self.filter_worker_id = None
         self.workers_list.selected_id = None
         self._update_filter_label()
+        self._update_worker_details()
         self._redraw_worker_output()
+
+    def _update_worker_details(self) -> None:
+        """Update the worker details panel based on current selection."""
+        if self.filter_worker_id is None:
+            self.worker_details.clear_worker()
+        else:
+            worker = self.federation.state.get_worker(self.filter_worker_id)
+            if worker:
+                self.worker_details.set_worker(self.filter_worker_id, worker)
 
     def _update_filter_label(self) -> None:
         """Update the filter label to show current filter."""
@@ -382,8 +485,12 @@ class FederationApp(App):
             self.chat_log.write(Text(f">> {msg}", style="blue"))
 
     def _refresh_workers(self) -> None:
-        """Refresh the workers list."""
-        self.workers_list.workers = dict(self.federation.state.list_workers())
+        """Refresh the workers list and details."""
+        workers = dict(self.federation.state.list_workers())
+        self.workers_list.workers = workers
+        # Also refresh details if a worker is selected (status may have changed)
+        if self.filter_worker_id:
+            self._update_worker_details()
 
     def _log_event(self, event: Event) -> None:
         """Log event to the event log."""
