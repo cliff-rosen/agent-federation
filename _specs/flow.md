@@ -1,106 +1,44 @@
-Entities
+  Before (awkward wiring)
 
-  1. Master Agent
-  - The orchestrator - there's only one
-  - Talks directly to the user
-  - Decides: "Can I handle this myself, or should I delegate?"
-  - Has special tools for managing workers (spawn, delegate, terminate)
-  - Runs its own agentic loop (call LLM → execute tools → repeat)
+  # run.py - 5 objects manually wired together
+  event_bus = EventBus()
+  state_manager = StateManager(workspace_path=workspace_path)
+  master = MasterAgent(workspace_path, state_manager, event_bus)
+  worker_runner = WorkerRunner(state_manager, event_bus, workspace_path)
+  master.set_worker_runner(worker_runner)  # Post-construction setter
+  app = FederationApp(master, worker_runner, state_manager)  # worker_runner unused!
 
-  2. Worker Agents
-  - Spawned by the master on demand
-  - Each has: an ID, a type (from template), a system prompt, allowed tools
-  - Do actual work (read files, write files, etc.)
-  - Run their own agentic loop when delegated to
-  - Report results back to master
+  After (clean coordinator pattern)
 
-  3. State Manager
-  - Tracks all workers (who exists, their status: idle/busy/done)
-  - Tracks delegations (what task, which worker, what to do when done)
-  - Holds agent templates (predefined configs like "researcher", "coder")
+  # run.py - 2 lines
+  federation = Federation(workspace_path=workspace_path)
+  app = FederationApp(federation)
 
-  4. Event Bus
-  - Broadcasts events as things happen (master speaking, worker spawned, tool called)
-  - UI subscribes to these events to show real-time updates
+  New Architecture
 
-  5. UI (FederationApp)
-  - Displays chat and agent status
-  - Takes user input, sends to master
-  - Listens to event bus, updates display
+  Federation (coordinator)
+  ├── event_bus: EventBus        # Communication channel
+  ├── state: StateManager        # Shared state
+  ├── workspace_path: str        # Shared filesystem location
+  ├── master: MasterAgent        # Lazy-created, references federation
+  └── worker_runner: WorkerRunner # Lazy-created, references federation
 
-  ---
-  Rules of Engagement
-
-  ┌─────────────────────────────────────────────────────────┐
-  │  USER                                                   │
-  │    │                                                    │
-  │    ▼                                                    │
-  │  ┌─────────────┐                                        │
-  │  │   UI        │ ◄─────── Event Bus (status updates)   │
-  │  └─────────────┘                                        │
-  │    │                                                    │
-  │    ▼ sends message                                      │
-  │  ┌─────────────────────────────────────┐                │
-  │  │         MASTER AGENT                │                │
-  │  │  - receives user request            │                │
-  │  │  - calls LLM with MASTER_TOOLS      │                │
-  │  │  - executes orchestration tools     │                │
-  │  └─────────────────────────────────────┘                │
-  │    │                                                    │
-  │    │ spawn_agent / delegate                             │
-  │    ▼                                                    │
-  │  ┌─────────────────────────────────────┐                │
-  │  │         WORKER AGENT(s)             │                │
-  │  │  - receives task from master        │                │
-  │  │  - calls LLM with WORKER_TOOLS      │                │
-  │  │  - executes file/search tools       │                │
-  │  │  - returns result to master         │                │
-  │  └─────────────────────────────────────┘                │
-  │    │                                                    │
-  │    ▼ reads/writes                                       │
-  │  ┌─────────────┐                                        │
-  │  │  WORKSPACE  │  (shared filesystem)                   │
-  │  └─────────────┘                                        │
-  └─────────────────────────────────────────────────────────┘
-
-  ---
-  The Two Tool Sets
-
-  Master's tools (orchestration):
-  ┌─────────────────────┬─────────────────────────────────────────────┐
-  │        Tool         │                    Does                     │
-  ├─────────────────────┼─────────────────────────────────────────────┤
-  │ spawn_agent         │ Create a new worker                         │
-  ├─────────────────────┼─────────────────────────────────────────────┤
-  │ delegate            │ Give a task to a worker, run it, get result │
-  ├─────────────────────┼─────────────────────────────────────────────┤
-  │ terminate_agent     │ Kill a worker                               │
-  ├─────────────────────┼─────────────────────────────────────────────┤
-  │ list_agent_types    │ See available templates                     │
-  ├─────────────────────┼─────────────────────────────────────────────┤
-  │ list_running_agents │ See active workers                          │
-  └─────────────────────┴─────────────────────────────────────────────┘
-  Worker's tools (actual work):
-  ┌──────────────┬───────────────────────┐
-  │     Tool     │         Does          │
-  ├──────────────┼───────────────────────┤
-  │ read_file    │ Read from workspace   │
-  ├──────────────┼───────────────────────┤
-  │ write_file   │ Write to workspace    │
-  ├──────────────┼───────────────────────┤
-  │ search_files │ Find files by pattern │
-  └──────────────┴───────────────────────┘
-  ---
-  Typical Flow
-
-  1. User: "Write a haiku about coding to poem.txt"
-  2. Master LLM decides: "I should delegate this"
-  3. Master calls spawn_agent("general") → gets worker abc123
-  4. Master calls delegate(agent_id="abc123", task="Write a haiku...", intention="return_to_user")
-  5. Inside delegate:
-    - Worker abc123 runs its own loop
-    - Worker LLM decides to call write_file
-    - Worker writes to workspace
-    - Worker returns "Done, wrote haiku to poem.txt"
-  6. Delegate tool returns result to master
-  7. Master responds to user: "I've written a haiku to poem.txt"
+  Key improvements:
+  ┌────────────────────────────────────────────┬─────────────────────────────────────────┐
+  │                   Before                   │                  After                  │
+  ├────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ 5 separate objects passed around           │ 1 coordinator owns everything           │
+  ├────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ set_worker_runner() post-construction hack │ Lazy properties, no circular dependency │
+  ├────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ worker_runner passed to UI but unused      │ UI only takes what it needs             │
+  ├────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ workspace_path passed to 3 places          │ Single source of truth                  │
+  ├────────────────────────────────────────────┼─────────────────────────────────────────┤
+  │ Components reference each other directly   │ Components reference Federation         │
+  └────────────────────────────────────────────┴─────────────────────────────────────────┘
+  Each component now accesses shared resources via self.federation:
+  - self.federation.event_bus
+  - self.federation.state
+  - self.federation.workspace_path
+  - self.federation.worker_runner

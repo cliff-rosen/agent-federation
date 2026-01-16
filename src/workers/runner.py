@@ -1,11 +1,14 @@
 """Worker runner using Claude Agent SDK."""
 
+from __future__ import annotations
+
 import asyncio
 import threading
 import traceback
+from typing import TYPE_CHECKING
 
-from ..shared.events import EventBus
-from ..master.state import StateManager
+if TYPE_CHECKING:
+    from ..federation import Federation
 
 # Try to import Claude Agent SDK, fall back to simple mode if not available
 try:
@@ -18,20 +21,13 @@ except ImportError:
 class WorkerRunner:
     """Runs workers in background threads using Claude Agent SDK."""
 
-    def __init__(
-        self,
-        state_manager: StateManager,
-        event_bus: EventBus,
-        workspace_path: str = "./workspace",
-    ):
-        self.state = state_manager
-        self.events = event_bus
-        self.workspace_path = workspace_path
+    def __init__(self, federation: Federation):
+        self.federation = federation
         self._threads: dict[str, threading.Thread] = {}
 
     def start_worker(self, worker_id: str, task: str) -> None:
         """Start a worker in a background thread."""
-        worker = self.state.get_worker(worker_id)
+        worker = self.federation.state.get_worker(worker_id)
         if not worker:
             return
 
@@ -62,21 +58,24 @@ class WorkerRunner:
         allowed_tools: list[str],
     ) -> None:
         """Run a worker using Claude Agent SDK."""
+        events = self.federation.event_bus
+        state = self.federation.state
+
         # Emit started event so UI can refresh
-        self.events.worker_started(worker_id, task)
-        self.events.worker_text(worker_id, f"Starting task: {task}\n")
+        events.worker_started(worker_id, task)
+        events.worker_text(worker_id, f"Starting task: {task}\n")
 
         try:
             if not HAS_SDK:
                 # Fallback: simple simulation for testing
-                self.events.worker_text(worker_id, "[SDK not installed - running in test mode]\n")
+                events.worker_text(worker_id, "[SDK not installed - running in test mode]\n")
                 await asyncio.sleep(2)
                 result_text = f"[Test mode] Would have completed task: {task}"
-                self.state.complete_task(worker_id, result_text)
-                self.events.worker_done(worker_id, result_text)
+                state.complete_task(worker_id, result_text)
+                events.worker_done(worker_id, result_text)
                 return
 
-            self.events.worker_text(worker_id, "Initializing Claude Agent SDK...\n")
+            events.worker_text(worker_id, "Initializing Claude Agent SDK...\n")
 
             # Assert for type checker - we return early above if HAS_SDK is False
             assert HAS_SDK
@@ -85,13 +84,13 @@ class WorkerRunner:
                 system_prompt=system_prompt,
                 allowed_tools=allowed_tools,
                 permission_mode="acceptEdits",
-                cwd=self.workspace_path,
+                cwd=self.federation.workspace_path,
             )
 
             result_text = ""
 
             async with ClaudeSDKClient(options=options) as client:
-                self.events.worker_text(worker_id, "Connected. Sending query...\n")
+                events.worker_text(worker_id, "Connected. Sending query...\n")
                 await client.query(task)
 
                 async for message in client.receive_response():
@@ -99,7 +98,7 @@ class WorkerRunner:
                         for block in message.content:
                             if isinstance(block, TextBlock):
                                 result_text += block.text
-                                self.events.worker_text(worker_id, block.text)
+                                events.worker_text(worker_id, block.text)
 
                     elif isinstance(message, ResultMessage):
                         # Task complete
@@ -107,14 +106,14 @@ class WorkerRunner:
                             result_text = message.result
 
             # Mark complete
-            self.state.complete_task(worker_id, result_text or "Task completed.")
-            self.events.worker_done(worker_id, result_text)
+            state.complete_task(worker_id, result_text or "Task completed.")
+            events.worker_done(worker_id, result_text)
 
         except Exception as e:
             error_msg = f"Worker error: {e}\n{traceback.format_exc()}"
-            self.events.worker_text(worker_id, f"\n[ERROR] {error_msg}\n")
-            self.state.complete_task(worker_id, error_msg)
-            self.events.worker_done(worker_id, error_msg)
+            events.worker_text(worker_id, f"\n[ERROR] {error_msg}\n")
+            state.complete_task(worker_id, error_msg)
+            events.worker_done(worker_id, error_msg)
 
         finally:
             # Clean up thread reference

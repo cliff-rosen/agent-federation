@@ -1,5 +1,9 @@
 """Terminal UI application using Textual."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Header, Footer, Static, Input, RichLog, ListView, ListItem, Label
@@ -11,6 +15,9 @@ from rich.panel import Panel
 
 from ..shared.events import Event, EventType
 from ..shared.types import WorkerStatus, MasterStatus
+
+if TYPE_CHECKING:
+    from ..federation import Federation
 
 
 class WorkerSelected(Message):
@@ -269,11 +276,9 @@ class FederationApp(App):
         ("escape", "deselect", "Deselect"),
     ]
 
-    def __init__(self, master_agent, worker_runner, state_manager):
+    def __init__(self, federation: Federation) -> None:
         super().__init__()
-        self.master = master_agent
-        self.worker_runner = worker_runner
-        self.state_manager = state_manager
+        self.federation = federation
         self.selected_worker_id: str | None = None
 
     def compose(self) -> ComposeResult:
@@ -305,7 +310,7 @@ class FederationApp(App):
         self.worker_output = self.query_one("#worker-output-panel", WorkerOutputPanel)
 
         # Subscribe to events
-        self.master.event_bus.subscribe(self.handle_event)
+        self.federation.event_bus.subscribe(self.handle_event)
 
         self.chat.add_status("Agent Federation ready")
         self.chat.add_status("Click a worker to see its output")
@@ -313,7 +318,7 @@ class FederationApp(App):
     def on_worker_selected(self, message: WorkerSelected) -> None:
         """Handle worker selection."""
         self.selected_worker_id = message.worker_id
-        worker = self.state_manager.get_worker(message.worker_id) if message.worker_id else None
+        worker = self.federation.state.get_worker(message.worker_id) if message.worker_id else None
         self.worker_output.set_worker(message.worker_id, worker)
 
     def action_deselect(self) -> None:
@@ -360,7 +365,7 @@ class FederationApp(App):
             # Auto-select the started worker
             self.selected_worker_id = agent_id
             self.workers_panel.selected_id = agent_id
-            worker = self.state_manager.get_worker(agent_id)
+            worker = self.federation.state.get_worker(agent_id)
             self.worker_output.set_worker(agent_id, worker)
 
         elif event.type == EventType.WORKER_TEXT:
@@ -391,7 +396,7 @@ class FederationApp(App):
 
     def _refresh_workers(self) -> None:
         """Refresh the workers panel."""
-        self.workers_panel.worker_data = dict(self.state_manager.state.workers)
+        self.workers_panel.worker_data = dict(self.federation.state.list_workers())
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle user input."""
@@ -408,7 +413,7 @@ class FederationApp(App):
     def run_master(self, message: str) -> None:
         """Run the master agent in a background thread."""
         try:
-            self.master.run(message)
+            self.federation.run(message)
         except Exception as e:
             self.call_from_thread(self.chat.add_error, str(e))
         finally:

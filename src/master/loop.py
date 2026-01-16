@@ -1,11 +1,16 @@
 """Master agent agentic loop with streaming."""
 
-import anthropic
+from __future__ import annotations
 
-from ..shared.events import EventBus, EventType, Event
+import anthropic
+from typing import TYPE_CHECKING
+
+from ..shared.events import EventType, Event
 from ..shared.types import MasterStatus
-from .state import StateManager
 from .tools import MASTER_TOOLS, ToolExecutor
+
+if TYPE_CHECKING:
+    from ..federation import Federation
 
 
 MASTER_SYSTEM_PROMPT = """You are the Master Agent in an agent federation system.
@@ -40,26 +45,19 @@ class MasterAgent:
 
     def __init__(
         self,
+        federation: Federation,
         api_key: str | None = None,
         model: str = "claude-sonnet-4-20250514",
-        workspace_path: str = "./workspace",
-        state_manager: StateManager | None = None,
-        event_bus: EventBus | None = None,
     ):
+        self.federation = federation
         self.client = anthropic.Anthropic(api_key=api_key)
         self.model = model
-        self.event_bus = event_bus or EventBus()
-        self.state_manager = state_manager or StateManager(workspace_path=workspace_path)
-        self.tool_executor = ToolExecutor(self.state_manager, self.event_bus)
+        self.tool_executor = ToolExecutor(federation)
         self.conversation: list[dict] = []
-
-    def set_worker_runner(self, runner) -> None:
-        """Set the worker runner for executing delegations."""
-        self.tool_executor.worker_runner = runner
 
     def run(self, user_message: str) -> str:
         """Run the agentic loop for a user message. Returns final response."""
-        self.state_manager.set_master_status(MasterStatus.THINKING)
+        self.federation.state.set_master_status(MasterStatus.THINKING)
         self.conversation.append({"role": "user", "content": user_message})
 
         final_response = ""
@@ -85,7 +83,7 @@ class MasterAgent:
                 # Execute tools
                 tool_results = []
                 for tc in tool_calls:
-                    self.state_manager.set_master_status(MasterStatus.CALLING_TOOL, tc["name"])
+                    self.federation.state.set_master_status(MasterStatus.CALLING_TOOL, tc["name"])
                     result = self.tool_executor.execute(tc["name"], tc["input"])
                     tool_results.append({
                         "type": "tool_result",
@@ -94,13 +92,13 @@ class MasterAgent:
                     })
 
                 self.conversation.append({"role": "user", "content": tool_results})
-                self.state_manager.set_master_status(MasterStatus.THINKING)
+                self.federation.state.set_master_status(MasterStatus.THINKING)
             else:
                 final_response = response_text
                 if response_text:
                     self.conversation.append({"role": "assistant", "content": response_text})
-                self.state_manager.set_master_status(MasterStatus.IDLE)
-                self.event_bus.emit(Event.create(EventType.MASTER_DONE))
+                self.federation.state.set_master_status(MasterStatus.IDLE)
+                self.federation.event_bus.emit(Event.create(EventType.MASTER_DONE))
                 break
 
         return final_response
@@ -133,7 +131,7 @@ class MasterAgent:
                     if hasattr(event.delta, "text"):
                         text_chunk = event.delta.text
                         collected_text += text_chunk
-                        self.event_bus.master_text(text_chunk)
+                        self.federation.event_bus.master_text(text_chunk)
                     elif hasattr(event.delta, "partial_json"):
                         if current_tool_call:
                             current_tool_call["_input_json"] += event.delta.partial_json

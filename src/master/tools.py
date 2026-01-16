@@ -1,10 +1,13 @@
 """Master agent orchestration tools."""
 
-from typing import Any
+from __future__ import annotations
+
+from typing import Any, TYPE_CHECKING
 
 from ..shared.types import Intention
-from ..shared.events import EventBus
-from .state import StateManager
+
+if TYPE_CHECKING:
+    from ..federation import Federation
 
 
 # Tool definitions for the master agent
@@ -93,19 +96,12 @@ MASTER_TOOLS = [
 class ToolExecutor:
     """Executes master agent tools."""
 
-    def __init__(
-        self,
-        state_manager: StateManager,
-        event_bus: EventBus,
-        worker_runner: Any = None,
-    ):
-        self.state = state_manager
-        self.events = event_bus
-        self.worker_runner = worker_runner
+    def __init__(self, federation: Federation):
+        self.federation = federation
 
     def execute(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         """Execute a tool and return the result."""
-        self.events.master_tool_call(tool_name, tool_input)
+        self.federation.event_bus.master_tool_call(tool_name, tool_input)
 
         handler = getattr(self, f"_tool_{tool_name}", None)
         if not handler:
@@ -113,11 +109,11 @@ class ToolExecutor:
         else:
             result = handler(**tool_input)
 
-        self.events.master_tool_result(tool_name, result)
+        self.federation.event_bus.master_tool_result(tool_name, result)
         return result
 
     def _tool_list_worker_types(self) -> str:
-        configs = self.state.list_worker_types()
+        configs = self.federation.state.list_worker_types()
         if not configs:
             return "No worker types available."
 
@@ -127,7 +123,7 @@ class ToolExecutor:
         return "\n".join(lines)
 
     def _tool_list_workers(self) -> str:
-        workers = self.state.list_workers()
+        workers = self.federation.state.list_workers()
         if not workers:
             return "No workers running."
 
@@ -142,8 +138,8 @@ class ToolExecutor:
 
     def _tool_spawn_worker(self, worker_type: str) -> str:
         try:
-            worker = self.state.spawn_worker(worker_type)
-            self.events.worker_spawned(worker.id, worker.type)
+            worker = self.federation.state.spawn_worker(worker_type)
+            self.federation.event_bus.worker_spawned(worker.id, worker.type)
             return f"Spawned {worker_type} worker with ID: {worker.id}"
         except ValueError as e:
             return f"Failed to spawn worker: {e}"
@@ -154,7 +150,7 @@ class ToolExecutor:
         task: str,
         intention: str,
     ) -> str:
-        worker = self.state.get_worker(worker_id)
+        worker = self.federation.state.get_worker(worker_id)
         if not worker:
             return f"Worker not found: {worker_id}"
 
@@ -168,17 +164,14 @@ class ToolExecutor:
             return f"Invalid intention: {intention}"
 
         # Assign the task
-        self.state.assign_task(worker_id, task, intention_enum)
+        self.federation.state.assign_task(worker_id, task, intention_enum)
 
         # Start the worker in the background
-        if self.worker_runner:
-            self.worker_runner.start_worker(worker_id, task)
-            return f"Delegated task to worker {worker_id}. Use get_completed to check when done."
-        else:
-            return f"Task assigned to {worker_id} but no worker runner configured."
+        self.federation.worker_runner.start_worker(worker_id, task)
+        return f"Delegated task to worker {worker_id}. Use get_completed to check when done."
 
     def _tool_get_completed(self) -> str:
-        completed = self.state.get_completed_workers()
+        completed = self.federation.state.get_completed_workers()
         if not completed:
             return "No completed tasks."
 
@@ -190,11 +183,11 @@ class ToolExecutor:
             lines.append(f"  Result: {worker.result}")
 
             # Clear the worker so it can be reused
-            self.state.clear_worker(worker.id)
+            self.federation.state.clear_worker(worker.id)
 
         return "\n".join(lines)
 
     def _tool_terminate_worker(self, worker_id: str) -> str:
-        if self.state.terminate_worker(worker_id):
+        if self.federation.state.terminate_worker(worker_id):
             return f"Worker {worker_id} terminated."
         return f"Worker not found: {worker_id}"
