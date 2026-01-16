@@ -2,15 +2,22 @@
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Header, Footer, Static, Input, RichLog
+from textual.widgets import Header, Footer, Static, Input, RichLog, ListView, ListItem, Label
 from textual.reactive import reactive
+from textual.message import Message
 from textual import work
 from rich.text import Text
 from rich.panel import Panel
-from rich.table import Table
 
 from ..shared.events import Event, EventType
 from ..shared.types import WorkerStatus, MasterStatus
+
+
+class WorkerSelected(Message):
+    """Message sent when a worker is selected."""
+    def __init__(self, worker_id: str | None) -> None:
+        self.worker_id = worker_id
+        super().__init__()
 
 
 class MasterPanel(Static):
@@ -33,57 +40,94 @@ class MasterPanel(Static):
         return Panel(status_text, title="Master", border_style="green")
 
 
+class WorkerItem(ListItem):
+    """A clickable worker item."""
+
+    def __init__(self, worker_id: str, worker) -> None:
+        super().__init__()
+        self.worker_id = worker_id
+        self.worker = worker
+
+    def compose(self) -> ComposeResult:
+        worker = self.worker
+        if worker.status == WorkerStatus.IDLE:
+            icon = "○"
+            style = "dim"
+        elif worker.status == WorkerStatus.WORKING:
+            icon = "●"
+            style = "yellow bold"
+        else:  # DONE
+            icon = "✓"
+            style = "green"
+
+        label = f"{icon} {worker.type}-{self.worker_id[:4]} [{worker.status.value}]"
+        yield Label(label, classes=style)
+
+
 class WorkersPanel(Static):
-    """Panel showing all workers and their status."""
+    """Panel showing all workers - click to select."""
 
     workers: reactive[dict] = reactive({}, always_update=True)
+    selected_id: reactive[str | None] = reactive(None)
 
-    def render(self) -> Panel:
-        if not self.workers:
-            content = Text("No workers", style="dim")
-            return Panel(content, title="Workers", border_style="blue")
+    def compose(self) -> ComposeResult:
+        yield ListView(id="workers-list")
 
-        table = Table(box=None, expand=True, show_header=False, padding=(0, 1))
-        table.add_column("Worker", style="bold", no_wrap=True)
-        table.add_column("Status", justify="right", no_wrap=True)
+    def watch_workers(self, workers: dict) -> None:
+        """Update the list when workers change."""
+        list_view = self.query_one("#workers-list", ListView)
+        list_view.clear()
 
-        for worker_id, worker in self.workers.items():
-            # Status indicator
-            if worker.status == WorkerStatus.IDLE:
-                status_text = Text("idle", style="dim")
-                icon = "○"
-            elif worker.status == WorkerStatus.WORKING:
-                status_text = Text("working", style="yellow bold")
-                icon = "●"
-            else:  # DONE
-                status_text = Text("done", style="green")
-                icon = "✓"
+        if not workers:
+            list_view.append(ListItem(Label("No workers", classes="dim")))
+            return
 
-            # Worker name with icon
-            name_text = Text(f"{icon} {worker.type}-{worker_id[:4]}", style="white")
-            table.add_row(name_text, status_text)
+        for worker_id, worker in workers.items():
+            item = WorkerItem(worker_id, worker)
+            if worker_id == self.selected_id:
+                item.highlighted = True
+            list_view.append(item)
 
-            # Show current task if working
-            if worker.status == WorkerStatus.WORKING and worker.current_task:
-                task_preview = worker.current_task[:35]
-                if len(worker.current_task) > 35:
-                    task_preview += "..."
-                table.add_row(
-                    Text(f"  {task_preview}", style="dim italic"),
-                    Text("")
-                )
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        """Handle worker selection."""
+        if isinstance(event.item, WorkerItem):
+            self.selected_id = event.item.worker_id
+            self.post_message(WorkerSelected(event.item.worker_id))
 
-            # Show result preview if done
-            if worker.status == WorkerStatus.DONE and worker.result:
-                result_preview = worker.result[:35].replace("\n", " ")
-                if len(worker.result) > 35:
-                    result_preview += "..."
-                table.add_row(
-                    Text(f"  → {result_preview}", style="green dim"),
-                    Text("")
-                )
 
-        return Panel(table, title="Workers", border_style="blue")
+class WorkerOutputPanel(Static):
+    """Panel showing selected worker's streaming output."""
+
+    worker_id: reactive[str | None] = reactive(None)
+
+    def compose(self) -> ComposeResult:
+        yield RichLog(id="worker-output", highlight=True, markup=True)
+
+    def on_mount(self) -> None:
+        self.log = self.query_one("#worker-output", RichLog)
+
+    def set_worker(self, worker_id: str | None, worker=None) -> None:
+        """Set the worker to display."""
+        self.worker_id = worker_id
+        self.log.clear()
+        if worker_id and worker:
+            self.log.write(Text(f"Worker: {worker.type}-{worker_id[:4]}", style="bold"))
+            if worker.current_task:
+                self.log.write(Text(f"Task: {worker.current_task}", style="dim"))
+            self.log.write(Text("─" * 30, style="dim"))
+
+    def add_text(self, text: str) -> None:
+        """Add streaming text."""
+        self.log.write(Text(text, style="white"))
+
+    def add_tool_call(self, tool_name: str) -> None:
+        """Add tool call."""
+        self.log.write(Text(f"[{tool_name}]", style="cyan"))
+
+    def add_done(self, result: str) -> None:
+        """Mark complete."""
+        self.log.write(Text("─" * 30, style="dim"))
+        self.log.write(Text("Done", style="green bold"))
 
 
 class ChatLog(RichLog):
@@ -124,13 +168,6 @@ class ChatLog(RichLog):
         self._flush_buffer()
         self.write(Text(f"[{tool_name}]", style="cyan"))
 
-    def add_worker_output(self, worker_id: str, text: str) -> None:
-        """Show worker output."""
-        self._flush_buffer()
-        for line in text.split("\n"):
-            if line:
-                self.write(Text(f"  [{worker_id}] {line}", style="dim"))
-
     def add_status(self, message: str) -> None:
         self._flush_buffer()
         self.write(Text(f">> {message}", style="blue"))
@@ -150,9 +187,9 @@ class FederationApp(App):
     CSS = """
     Screen {
         layout: grid;
-        grid-size: 2 2;
+        grid-size: 2 3;
         grid-columns: 3fr 1fr;
-        grid-rows: 1fr auto;
+        grid-rows: 2fr 1fr auto;
     }
 
     #chat-container {
@@ -161,10 +198,23 @@ class FederationApp(App):
         padding: 0 1;
     }
 
-    #sidebar {
+    #sidebar-top {
         row-span: 1;
         padding: 0 1;
         min-width: 30;
+    }
+
+    #sidebar-bottom {
+        row-span: 1;
+        padding: 0 1;
+        min-width: 30;
+        border: solid blue;
+    }
+
+    #worker-detail {
+        row-span: 1;
+        border: solid yellow;
+        padding: 0 1;
     }
 
     #input-container {
@@ -177,13 +227,22 @@ class FederationApp(App):
         background: $surface;
     }
 
+    #worker-output {
+        background: $surface;
+        height: 100%;
+    }
+
     MasterPanel {
         height: auto;
         margin-bottom: 1;
     }
 
     WorkersPanel {
-        height: auto;
+        height: 100%;
+    }
+
+    #workers-list {
+        height: 100%;
     }
 
     Input {
@@ -194,6 +253,7 @@ class FederationApp(App):
     BINDINGS = [
         ("ctrl+c", "quit", "Quit"),
         ("ctrl+l", "clear", "Clear"),
+        ("escape", "deselect", "Deselect"),
     ]
 
     def __init__(self, master_agent, worker_runner, state_manager):
@@ -201,6 +261,7 @@ class FederationApp(App):
         self.master = master_agent
         self.worker_runner = worker_runner
         self.state_manager = state_manager
+        self.selected_worker_id: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -209,9 +270,13 @@ class FederationApp(App):
             with Vertical(id="chat-container"):
                 yield ChatLog(id="chat", highlight=True, markup=True)
 
-            with Vertical(id="sidebar"):
+            with Vertical(id="sidebar-top"):
                 yield MasterPanel(id="master-panel")
                 yield WorkersPanel(id="workers-panel")
+
+        with Horizontal():
+            with Vertical(id="worker-detail"):
+                yield WorkerOutputPanel(id="worker-output-panel")
 
         with Horizontal(id="input-container"):
             yield Input(placeholder="Enter message...", id="input")
@@ -224,11 +289,25 @@ class FederationApp(App):
         self.chat = self.query_one("#chat", ChatLog)
         self.master_panel = self.query_one("#master-panel", MasterPanel)
         self.workers_panel = self.query_one("#workers-panel", WorkersPanel)
+        self.worker_output = self.query_one("#worker-output-panel", WorkerOutputPanel)
 
         # Subscribe to events
         self.master.event_bus.subscribe(self.handle_event)
 
         self.chat.add_status("Agent Federation ready")
+        self.chat.add_status("Click a worker to see its output")
+
+    def on_worker_selected(self, message: WorkerSelected) -> None:
+        """Handle worker selection."""
+        self.selected_worker_id = message.worker_id
+        worker = self.state_manager.get_worker(message.worker_id) if message.worker_id else None
+        self.worker_output.set_worker(message.worker_id, worker)
+
+    def action_deselect(self) -> None:
+        """Deselect worker."""
+        self.selected_worker_id = None
+        self.workers_panel.selected_id = None
+        self.worker_output.set_worker(None, None)
 
     def handle_event(self, event: Event) -> None:
         """Handle events from the federation."""
@@ -265,14 +344,34 @@ class FederationApp(App):
             self._refresh_workers()
             agent_id = event.data.get("agent_id", "")
             self.chat.add_status(f"Worker {agent_id} started")
+            # Auto-select the started worker
+            self.selected_worker_id = agent_id
+            self.workers_panel.selected_id = agent_id
+            worker = self.state_manager.get_worker(agent_id)
+            self.worker_output.set_worker(agent_id, worker)
 
         elif event.type == EventType.WORKER_TEXT:
-            pass  # Workers run in background, we show result when done
+            agent_id = event.data.get("agent_id", "")
+            text = event.data.get("text", "")
+            # Show in worker output if this worker is selected
+            if agent_id == self.selected_worker_id:
+                self.worker_output.add_text(text)
+
+        elif event.type == EventType.WORKER_TOOL_CALL:
+            agent_id = event.data.get("agent_id", "")
+            tool_name = event.data.get("tool_name", "")
+            # Show in worker output if this worker is selected
+            if agent_id == self.selected_worker_id:
+                self.worker_output.add_tool_call(tool_name)
 
         elif event.type == EventType.WORKER_DONE:
             self._refresh_workers()
             agent_id = event.data.get("agent_id", "")
+            result = event.data.get("result", "")
             self.chat.add_status(f"Worker {agent_id} completed")
+            # Update worker output if selected
+            if agent_id == self.selected_worker_id:
+                self.worker_output.add_done(result)
 
         elif event.type == EventType.STATUS_UPDATE:
             self.chat.add_status(event.data.get("message", ""))
