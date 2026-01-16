@@ -46,6 +46,8 @@ class Worker:
     result: str | None = None
 
     created_at: datetime = field(default_factory=datetime.now)
+    started_at: datetime | None = None  # When task started
+    last_event_at: datetime | None = None  # Last event received
 
 
 @dataclass

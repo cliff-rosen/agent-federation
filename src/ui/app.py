@@ -121,14 +121,47 @@ class WorkersList(Static):
         container.mount(ClickableWorkerItem(None, f"{all_prefix}◉ ALL WORKERS", self._handle_selection, classes=all_classes))
 
         # Add each worker
+        from datetime import datetime
+        now = datetime.now()
         for worker_id, worker in self._workers.items():
             is_selected = self._selected_id == worker_id
             icon = {"idle": "○", "working": "●", "done": "✓"}.get(worker.status.value, "?")
             color = {"idle": "dim", "working": "yellow", "done": "green"}.get(worker.status.value, "")
             prefix = "▶ " if is_selected else "  "
-            text = f"{prefix}{icon} {worker_id[:8]} {worker.type}"
+
+            # Calculate timing info
+            running_time = ""
+            if worker.started_at:
+                elapsed = now - worker.started_at
+                running_time = self._format_duration(elapsed.total_seconds())
+
+            last_event = ""
+            if worker.last_event_at:
+                since = now - worker.last_event_at
+                last_event = self._format_duration(since.total_seconds())
+
+            # Format: prefix icon id type [running] [last]
+            timing = ""
+            if running_time:
+                timing = f" ({running_time}"
+                if last_event and worker.status.value == "working":
+                    timing += f"/{last_event}"
+                timing += ")"
+
+            text = f"{prefix}{icon} {worker_id[:8]} {worker.type}{timing}"
             classes = f"{color} worker-item" if color else "worker-item"
             container.mount(ClickableWorkerItem(worker_id, text, self._handle_selection, classes=classes))
+
+    def _format_duration(self, seconds: float) -> str:
+        """Format a duration in seconds to a human-readable string."""
+        if seconds < 60:
+            return f"{int(seconds)}s"
+        elif seconds < 3600:
+            return f"{int(seconds // 60)}m{int(seconds % 60)}s"
+        else:
+            hours = int(seconds // 3600)
+            mins = int((seconds % 3600) // 60)
+            return f"{hours}h{mins}m"
 
 
 class WorkerDetails(Static):
@@ -218,7 +251,7 @@ class FederationApp(App):
     Screen {
         layout: grid;
         grid-size: 3 1;
-        grid-columns: 2fr 1fr 1fr;
+        grid-columns: 1fr 2fr 1fr;
     }
 
     /* Left column - Chat */
@@ -268,10 +301,16 @@ class FederationApp(App):
 
     #worker-output {
         height: 100%;
+        overflow: auto;
     }
 
     #event-log {
         height: 100%;
+        overflow: auto;
+    }
+
+    #worker-details {
+        overflow-x: auto;
     }
 
     #workers-container {
@@ -466,12 +505,15 @@ class FederationApp(App):
             self.chat_log.write(Text(f">> Spawned {agent_type}: {agent_id[:8]}", style="blue"))
 
         elif event.type == EventType.WORKER_STARTED:
-            self._refresh_workers()
             agent_id = event.agent_id or ""
+            self.federation.state.update_worker_event_time(agent_id)
+            self._refresh_workers()
             self._add_worker_output(agent_id, f"─── started ───", style="yellow bold")
 
         elif event.type == EventType.WORKER_TEXT:
             agent_id = event.agent_id or ""
+            self.federation.state.update_worker_event_time(agent_id)
+            self._refresh_workers()  # Update timing display
             text = event.data.get("text", "")
             if text:
                 # Handle multi-line text
@@ -482,11 +524,14 @@ class FederationApp(App):
         elif event.type == EventType.WORKER_TOOL_CALL:
             agent_id = event.agent_id or ""
             tool_name = event.data.get("tool_name", "")
+            self.federation.state.update_worker_event_time(agent_id)
+            self._refresh_workers()  # Update timing display
             self._add_worker_output(agent_id, f"[calling {tool_name}]", style="cyan")
 
         elif event.type == EventType.WORKER_DONE:
-            self._refresh_workers()
             agent_id = event.agent_id or ""
+            self.federation.state.update_worker_event_time(agent_id)
+            self._refresh_workers()
             self._add_worker_output(agent_id, f"─── done ───", style="green")
             self.chat_log.flush_buffer()
             self.chat_log.write(Text(f">> Worker {agent_id[:8]} completed", style="green"))
@@ -498,11 +543,7 @@ class FederationApp(App):
 
     def _refresh_workers(self) -> None:
         """Refresh the workers list and details."""
-        with open("debug.log", "a") as f:
-            workers = dict(self.federation.state.list_workers())
-            f.write(f"_refresh_workers: got {len(workers)} workers from state\n")
-            for wid, w in workers.items():
-                f.write(f"  - {wid}: {w.type} ({w.status.value})\n")
+        workers = dict(self.federation.state.list_workers())
         self.workers_list.workers = workers
         # Also refresh details if a worker is selected (status may have changed)
         if self.filter_worker_id:

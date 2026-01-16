@@ -105,6 +105,7 @@ class StateManager:
         intention: Intention,
     ) -> bool:
         """Assign a task to a worker."""
+        from datetime import datetime
         worker = self.state.workers.get(worker_id)
         if not worker:
             return False
@@ -113,22 +114,33 @@ class StateManager:
         worker.current_task = task
         worker.intention = intention
         worker.result = None
+        worker.started_at = datetime.now()
+        worker.last_event_at = datetime.now()
         return True
 
     def complete_task(self, worker_id: str, result: str) -> bool:
         """Mark a worker's task as complete."""
+        from datetime import datetime
         worker = self.state.workers.get(worker_id)
         if not worker:
             return False
 
         worker.status = WorkerStatus.DONE
         worker.result = result
+        worker.last_event_at = datetime.now()
 
         # Add to completed queue for master to pick up
         if worker_id not in self.state.completed_queue:
             self.state.completed_queue.append(worker_id)
 
         return True
+
+    def update_worker_event_time(self, worker_id: str) -> None:
+        """Update the last event time for a worker."""
+        from datetime import datetime
+        worker = self.state.workers.get(worker_id)
+        if worker:
+            worker.last_event_at = datetime.now()
 
     def clear_worker(self, worker_id: str) -> bool:
         """Reset a worker to idle state."""
