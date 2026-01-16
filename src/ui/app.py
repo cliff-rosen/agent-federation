@@ -144,8 +144,8 @@ class FederationApp(App):
     CSS = """
     Screen {
         layout: grid;
-        grid-size: 3 2;
-        grid-columns: 2fr 1fr;
+        grid-size: 2 2;
+        grid-columns: 3fr 1fr;
         grid-rows: 1fr auto;
     }
 
@@ -159,7 +159,8 @@ class FederationApp(App):
     #sidebar {
         column-span: 1;
         row-span: 1;
-        padding: 0;
+        padding: 0 1;
+        min-width: 28;
     }
 
     #input-container {
