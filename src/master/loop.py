@@ -40,11 +40,13 @@ class MasterAgent:
         api_key: str | None = None,
         model: str = "claude-sonnet-4-20250514",
         workspace_path: str = "./workspace",
+        state_manager: StateManager | None = None,
+        event_bus: EventBus | None = None,
     ):
         self.client = anthropic.Anthropic(api_key=api_key)
         self.model = model
-        self.event_bus = EventBus()
-        self.state_manager = StateManager(workspace_path=workspace_path)
+        self.event_bus = event_bus or EventBus()
+        self.state_manager = state_manager or StateManager(workspace_path=workspace_path)
         self.tool_executor = ToolExecutor(self.state_manager, self.event_bus)
         self.conversation: list[dict] = []
 
