@@ -3,10 +3,27 @@
 This document traces the complete flow when a user types:
 > "Let's use the research agent to check the weather in Boulder, Colorado"
 
+## Architecture Overview
+
+All components are owned by a single `Federation` coordinator:
+
+```
+Federation
+├── event_bus: EventBus         # Communication channel for streaming events
+├── state: StateManager         # Workers, configs, and task state
+├── workspace_path: str         # Shared filesystem location
+├── master: MasterAgent         # Orchestrator (lazy-created)
+└── worker_runner: WorkerRunner # Executes workers (lazy-created)
+```
+
+Components access shared resources via `self.federation` rather than holding direct references to each other.
+
+---
+
 ## Phase 1: User Input → Master Agent
 
 ### Step 1.1: Input Widget Captures Text
-**File:** `src/ui/app.py:396-405`
+**File:** `src/ui/app.py:401-410`
 
 ```python
 async def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -27,31 +44,43 @@ The Textual `Input` widget fires `Input.Submitted` when the user presses Enter. 
 4. Calls `run_master(message)`
 
 ### Step 1.2: Background Thread for Master
-**File:** `src/ui/app.py:407-417`
+**File:** `src/ui/app.py:412-422`
 
 ```python
 @work(thread=True, exclusive=True)
 def run_master(self, message: str) -> None:
     try:
-        self.master.run(message)
+        self.federation.run(message)
     except Exception as e:
         self.call_from_thread(self.chat.add_error, str(e))
     finally:
         self.call_from_thread(setattr, self.master_panel, "status", MasterStatus.IDLE)
 ```
 
-The `@work(thread=True)` decorator runs this in a background thread so the UI stays responsive. It calls `self.master.run(message)` where `self.master` is the `MasterAgent` instance.
+The `@work(thread=True)` decorator runs this in a background thread so the UI stays responsive. It calls `self.federation.run(message)` which delegates to the master agent.
+
+### Step 1.3: Federation Delegates to Master
+**File:** `src/federation.py:53-54`
+
+```python
+def run(self, message: str) -> str:
+    """Send a message to the master agent and get the response."""
+    return self.master.run(message)
+```
+
+The Federation's `run()` method is a convenience that forwards to the master agent.
 
 ---
 
 ## Phase 2: Master Agent Agentic Loop
 
 ### Step 2.1: Add Message to Conversation
-**File:** `src/master/loop.py:60-66`
+**File:** `src/master/loop.py:58-66`
 
 ```python
 def run(self, user_message: str) -> str:
-    self.state_manager.set_master_status(MasterStatus.THINKING)
+    """Run the agentic loop for a user message. Returns final response."""
+    self.federation.state.set_master_status(MasterStatus.THINKING)
     self.conversation.append({"role": "user", "content": user_message})
 
     final_response = ""
@@ -60,10 +89,13 @@ def run(self, user_message: str) -> str:
         response_text, tool_calls = self._call_llm_streaming()
 ```
 
-The master agent maintains a `conversation` list (standard Anthropic messages format). It appends the user message and enters the agentic loop.
+The master agent:
+1. Updates status via `self.federation.state`
+2. Appends the user message to conversation history
+3. Enters the agentic loop
 
 ### Step 2.2: Call LLM with Streaming
-**File:** `src/master/loop.py:108-154`
+**File:** `src/master/loop.py:106-152`
 
 ```python
 def _call_llm_streaming(self) -> tuple[str, list[dict]]:
@@ -79,36 +111,29 @@ def _call_llm_streaming(self) -> tuple[str, list[dict]]:
             if hasattr(event.delta, "text"):
                 text_chunk = event.delta.text
                 collected_text += text_chunk
-                self.event_bus.master_text(text_chunk)  # ← Streams to UI
-            # Handle tool use blocks
-            elif hasattr(event.delta, "partial_json"):
-                # Accumulate tool input JSON
+                self.federation.event_bus.master_text(text_chunk)  # ← Streams to UI
+            # Handle tool use blocks...
 ```
 
 Key points:
-- Uses Anthropic's streaming API (`client.messages.stream`)
-- The `MASTER_SYSTEM_PROMPT` tells the LLM it can spawn workers and delegate tasks
-- The `MASTER_TOOLS` define what tools are available (spawn_worker, delegate, etc.)
-- Text chunks are emitted via `event_bus.master_text()` for real-time display
+- Uses Anthropic's streaming API
+- Text chunks are emitted via `self.federation.event_bus` for real-time display
+- All shared resources accessed through `self.federation`
 
 ### Step 2.3: LLM Decides to Use Tools
-The LLM sees the user wants to use a "research agent" and decides to:
-1. Call `spawn_worker` with `agent_type="researcher"`
-2. Call `delegate` to assign the weather task
 
-The streaming response might look like:
-> "I'll spawn a researcher agent and have it check the weather in Boulder."
-> [tool_use: spawn_worker {agent_type: "researcher"}]
-> [tool_use: delegate {agent_id: "abc123", task: "Check the weather in Boulder, Colorado"}]
+The LLM sees the user wants to use a "research agent" and decides to call tools:
+1. `spawn_worker` with `worker_type="researcher"`
+2. `delegate` to assign the weather task
 
 ### Step 2.4: Execute Tools
-**File:** `src/master/loop.py:85-96`
+**File:** `src/master/loop.py:83-94`
 
 ```python
 # Execute tools
 tool_results = []
 for tc in tool_calls:
-    self.state_manager.set_master_status(MasterStatus.CALLING_TOOL, tc["name"])
+    self.federation.state.set_master_status(MasterStatus.CALLING_TOOL, tc["name"])
     result = self.tool_executor.execute(tc["name"], tc["input"])
     tool_results.append({
         "type": "tool_result",
@@ -117,45 +142,44 @@ for tc in tool_calls:
     })
 ```
 
-For each tool call, the `ToolExecutor` runs the corresponding function.
+The `ToolExecutor` runs each tool, accessing the federation for state and events.
 
 ---
 
 ## Phase 3: Spawning the Worker
 
 ### Step 3.1: spawn_worker Tool
-**File:** `src/master/tools.py` (spawn_worker handler)
+**File:** `src/master/tools.py:139-145`
 
 ```python
-def _spawn_worker(self, agent_type: str) -> str:
-    config = self.state.get_agent_config(agent_type)
-    if not config:
-        return f"Unknown agent type: {agent_type}"
-
-    worker_id = self.state.spawn_worker(agent_type, config)
-    self.events.worker_spawned(worker_id, agent_type)  # ← Event emitted
-    return f"Spawned {agent_type} worker: {worker_id}"
+def _tool_spawn_worker(self, worker_type: str) -> str:
+    try:
+        worker = self.federation.state.spawn_worker(worker_type)
+        self.federation.event_bus.worker_spawned(worker.id, worker.type)
+        return f"Spawned {worker_type} worker with ID: {worker.id}"
+    except ValueError as e:
+        return f"Failed to spawn worker: {e}"
 ```
 
 This:
-1. Gets the worker config (system prompt, allowed tools) from `StateManager`
-2. Creates a `Worker` object in state
-3. Emits `WORKER_SPAWNED` event
+1. Creates a `Worker` in state via `self.federation.state`
+2. Emits `WORKER_SPAWNED` event via `self.federation.event_bus`
 
 ### Step 3.2: Worker Created in State
-**File:** `src/master/state.py`
+**File:** `src/master/state.py:73-87`
 
 ```python
-def spawn_worker(self, agent_type: str, config: WorkerConfig) -> str:
-    worker_id = str(uuid.uuid4())
+def spawn_worker(self, worker_type: str) -> Worker:
+    config = self.state.worker_configs[worker_type]
+    worker_id = str(uuid.uuid4())[:8]
+
     worker = Worker(
         id=worker_id,
-        type=agent_type,
+        type=worker_type,
         config=config,
-        status=WorkerStatus.IDLE,
     )
     self.state.workers[worker_id] = worker
-    return worker_id
+    return worker
 ```
 
 The worker now exists in state with status `IDLE`.
@@ -165,36 +189,35 @@ The worker now exists in state with status `IDLE`.
 ## Phase 4: Delegating the Task
 
 ### Step 4.1: delegate Tool
-**File:** `src/master/tools.py` (delegate handler)
+**File:** `src/master/tools.py:147-171`
 
 ```python
-def _delegate(self, agent_id: str, task: str, intention: str = "return_to_user") -> str:
-    worker = self.state.get_worker(agent_id)
+def _tool_delegate(self, worker_id: str, task: str, intention: str) -> str:
+    worker = self.federation.state.get_worker(worker_id)
     if not worker:
-        return f"Worker not found: {agent_id}"
+        return f"Worker not found: {worker_id}"
 
-    # Assign task to worker
-    self.state.assign_task(agent_id, task, Intention(intention))
+    # Parse intention and assign task
+    intention_enum = Intention(intention)
+    self.federation.state.assign_task(worker_id, task, intention_enum)
 
-    # Start the worker in background (non-blocking!)
-    if self.worker_runner:
-        self.worker_runner.start_worker(agent_id, task)
-
-    return f"Delegated to {agent_id}: {task}"
+    # Start the worker in the background (non-blocking!)
+    self.federation.worker_runner.start_worker(worker_id, task)
+    return f"Delegated task to worker {worker_id}. Use get_completed to check when done."
 ```
 
 Critical: `start_worker` is **non-blocking**. The master doesn't wait for the worker to complete.
 
 ### Step 4.2: Start Worker in Background Thread
-**File:** `src/workers/runner.py:32-45`
+**File:** `src/workers/runner.py:28-41`
 
 ```python
 def start_worker(self, worker_id: str, task: str) -> None:
-    worker = self.state.get_worker(worker_id)
+    """Start a worker in a background thread."""
+    worker = self.federation.state.get_worker(worker_id)
     if not worker:
         return
 
-    # Run in background thread
     thread = threading.Thread(
         target=self._run_worker_sync,
         args=(worker_id, task, worker.config.system_prompt, worker.config.allowed_tools),
@@ -204,14 +227,14 @@ def start_worker(self, worker_id: str, task: str) -> None:
     thread.start()  # ← Returns immediately
 ```
 
-A daemon thread is spawned. The `delegate` tool returns immediately with "Delegated to abc123: Check the weather..."
+A daemon thread is spawned. The `delegate` tool returns immediately.
 
 ---
 
 ## Phase 5: Worker Execution
 
 ### Step 5.1: Worker Thread Runs
-**File:** `src/workers/runner.py:47-55`
+**File:** `src/workers/runner.py:43-51`
 
 ```python
 def _run_worker_sync(self, worker_id, task, system_prompt, allowed_tools):
@@ -221,45 +244,37 @@ def _run_worker_sync(self, worker_id, task, system_prompt, allowed_tools):
 The thread creates a new asyncio event loop and runs the async worker code.
 
 ### Step 5.2: Worker Emits Events
-**File:** `src/workers/runner.py:57-77`
+**File:** `src/workers/runner.py:53-76`
 
 ```python
 async def _run_worker_async(self, worker_id, task, system_prompt, allowed_tools):
+    events = self.federation.event_bus
+    state = self.federation.state
+
     # Emit started event so UI can refresh
-    self.events.worker_started(worker_id, task)  # ← WORKER_STARTED
-    self.events.worker_text(worker_id, f"Starting task: {task}\n")  # ← WORKER_TEXT
+    events.worker_started(worker_id, task)
+    events.worker_text(worker_id, f"Starting task: {task}\n")
 
     try:
         if not HAS_SDK:
             # Fallback: simple simulation for testing
-            self.events.worker_text(worker_id, "[SDK not installed - running in test mode]\n")
+            events.worker_text(worker_id, "[SDK not installed - running in test mode]\n")
             await asyncio.sleep(2)
             result_text = f"[Test mode] Would have completed task: {task}"
-            self.state.complete_task(worker_id, result_text)
-            self.events.worker_done(worker_id, result_text)  # ← WORKER_DONE
+            state.complete_task(worker_id, result_text)
+            events.worker_done(worker_id, result_text)
             return
 ```
+
+The worker accesses shared resources via `self.federation`:
+- `self.federation.event_bus` for emitting events
+- `self.federation.state` for updating task status
+- `self.federation.workspace_path` for file operations
 
 Events emitted:
 1. `WORKER_STARTED` - Worker begins execution
 2. `WORKER_TEXT` - Streaming text output
 3. `WORKER_DONE` - Worker completes
-
-### Step 5.3: With Claude Agent SDK (when installed)
-```python
-async with ClaudeSDKClient(options=options) as client:
-    self.events.worker_text(worker_id, "Connected. Sending query...\n")
-    await client.query(task)
-
-    async for message in client.receive_response():
-        if isinstance(message, AssistantMessage):
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    result_text += block.text
-                    self.events.worker_text(worker_id, block.text)  # ← Stream each chunk
-```
-
-Each text chunk from the SDK is emitted as a `WORKER_TEXT` event.
 
 ---
 
@@ -274,23 +289,21 @@ def emit(self, event: Event) -> None:
         handler(event)
 ```
 
-When `events.worker_text(worker_id, text)` is called:
-1. Creates an `Event` with `type=WORKER_TEXT`, `agent_id=worker_id`, `data={text: ...}`
-2. Calls all subscribed handlers
+All subscribed handlers receive the event.
 
 ### Step 6.2: UI Receives Event
-**File:** `src/ui/app.py:307-308`
+**File:** `src/ui/app.py:312-313`
 
 ```python
 def on_mount(self) -> None:
     # Subscribe to events
-    self.master.event_bus.subscribe(self.handle_event)
+    self.federation.event_bus.subscribe(self.handle_event)
 ```
 
-The UI subscribed to the EventBus during mount.
+The UI subscribed to `self.federation.event_bus` during mount.
 
 ### Step 6.3: Cross-Thread Event Handling
-**File:** `src/ui/app.py:325-327`
+**File:** `src/ui/app.py:330-332`
 
 ```python
 def handle_event(self, event: Event) -> None:
@@ -298,76 +311,30 @@ def handle_event(self, event: Event) -> None:
     self.call_from_thread(self._process_event, event)
 ```
 
-**Critical:** Events come from background threads (worker thread or master thread). Textual requires UI updates on the main thread. `call_from_thread` safely schedules the event processing on Textual's event loop.
+Events come from background threads. `call_from_thread` safely schedules processing on Textual's main thread.
 
 ### Step 6.4: Process Event on Main Thread
-**File:** `src/ui/app.py:356-371`
+**File:** `src/ui/app.py:361-376`
 
 ```python
-def _process_event(self, event: Event) -> None:
-    # ...
-    elif event.type == EventType.WORKER_STARTED:
-        self._refresh_workers()
-        agent_id = event.agent_id or ""
-        self.chat.add_status(f"Worker {agent_id} started")
-        # Auto-select the started worker
-        self.selected_worker_id = agent_id
-        self.workers_panel.selected_id = agent_id
-        worker = self.state_manager.get_worker(agent_id)
-        self.worker_output.set_worker(agent_id, worker)
+elif event.type == EventType.WORKER_STARTED:
+    self._refresh_workers()
+    agent_id = event.agent_id or ""
+    self.chat.add_status(f"Worker {agent_id} started")
+    # Auto-select the started worker
+    self.selected_worker_id = agent_id
+    self.workers_panel.selected_id = agent_id
+    worker = self.federation.state.get_worker(agent_id)
+    self.worker_output.set_worker(agent_id, worker)
 
-    elif event.type == EventType.WORKER_TEXT:
-        agent_id = event.agent_id or ""
-        text = event.data.get("text", "")
-        # Show in worker output if this worker is selected
-        if agent_id == self.selected_worker_id:
-            self.worker_output.add_text(text)
+elif event.type == EventType.WORKER_TEXT:
+    agent_id = event.agent_id or ""
+    text = event.data.get("text", "")
+    if agent_id == self.selected_worker_id:
+        self.worker_output.add_text(text)
 ```
 
-For `WORKER_STARTED`:
-1. Refreshes the workers list
-2. Auto-selects the new worker
-3. Sets up the worker output panel
-
-For `WORKER_TEXT`:
-1. Checks if this worker is currently selected
-2. If yes, adds the text to the output panel
-
----
-
-## Phase 7: UI Updates
-
-### Step 7.1: Worker Output Panel Displays Text
-**File:** `src/ui/app.py:123-128`
-
-```python
-def add_text(self, text: str) -> None:
-    """Add streaming text."""
-    try:
-        self.log.write(Text(text, style="white"))
-    except Exception:
-        pass
-```
-
-The `RichLog` widget displays the text with styling.
-
-### Step 7.2: Workers Panel Updates
-**File:** `src/ui/app.py:76-89`
-
-```python
-def watch_worker_data(self, worker_data: dict) -> None:
-    """Update the list when workers change."""
-    list_view = self.query_one("#workers-list", ListView)
-    list_view.clear()
-
-    for worker_id, worker in worker_data.items():
-        item = WorkerItem(worker_id, worker)
-        if worker_id == self.selected_id:
-            item.highlighted = True
-        list_view.append(item)
-```
-
-Textual's reactive system automatically calls `watch_worker_data` when `worker_data` changes.
+The UI accesses worker data via `self.federation.state`.
 
 ---
 
@@ -380,37 +347,41 @@ Input.Submitted event
        ↓
 on_input_submitted() → run_master() in background thread
        ↓
-MasterAgent.run() → _call_llm_streaming()
+federation.run() → master.run()
+       ↓
+MasterAgent._call_llm_streaming()
        ↓
 Anthropic API returns tool calls: spawn_worker, delegate
        ↓
-ToolExecutor.execute("spawn_worker") → StateManager creates Worker
-       ↓                                      ↓
-       ↓                              EventBus.emit(WORKER_SPAWNED)
-       ↓                                      ↓
-ToolExecutor.execute("delegate")        UI refreshes worker list
+ToolExecutor accesses federation.state to create Worker
        ↓
-WorkerRunner.start_worker() → spawns daemon thread
+federation.event_bus.emit(WORKER_SPAWNED) → UI refreshes
+       ↓
+ToolExecutor calls federation.worker_runner.start_worker()
        ↓
 (master continues, delegate returns immediately)
        ↓
-Worker thread: _run_worker_async()
+Worker thread accesses federation.event_bus
        ↓
-EventBus.emit(WORKER_STARTED) → UI auto-selects worker
+WORKER_STARTED → UI auto-selects worker
        ↓
-EventBus.emit(WORKER_TEXT) → UI shows text in output panel
-       ↓ (repeats for each chunk)
-EventBus.emit(WORKER_DONE) → UI shows completion
+WORKER_TEXT → UI shows text in output panel (repeated)
+       ↓
+WORKER_DONE → UI shows completion
 ```
 
 ## Key Design Decisions
 
-1. **Non-blocking delegation**: Master doesn't wait for workers. Users must call `get_completed` to check results.
+1. **Federation coordinator**: Single owner of all shared resources eliminates complex wiring.
 
-2. **Event-driven UI**: All updates flow through EventBus. Background threads never touch UI directly.
+2. **Lazy component creation**: `master` and `worker_runner` are created on first access, avoiding circular dependencies.
 
-3. **Thread safety via call_from_thread**: Textual's mechanism for safely updating UI from background threads.
+3. **Non-blocking delegation**: Master doesn't wait for workers. Users call `get_completed` to check results.
 
-4. **Streaming throughout**: Both master and workers stream text chunks for real-time feedback.
+4. **Event-driven UI**: All updates flow through `federation.event_bus`. Background threads never touch UI directly.
 
-5. **Auto-selection**: When a worker starts, it's automatically selected so the user sees its output immediately.
+5. **Thread safety via call_from_thread**: Textual's mechanism for safely updating UI from background threads.
+
+6. **Streaming throughout**: Both master and workers stream text chunks for real-time feedback.
+
+7. **Auto-selection**: When a worker starts, it's automatically selected so the user sees its output immediately.

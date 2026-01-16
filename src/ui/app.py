@@ -207,9 +207,9 @@ class FederationApp(App):
     CSS = """
     Screen {
         layout: grid;
-        grid-size: 2 3;
+        grid-size: 2 4;
         grid-columns: 3fr 1fr;
-        grid-rows: 2fr 1fr auto;
+        grid-rows: 2fr 1fr 6 auto;
     }
 
     #chat-container {
@@ -235,6 +235,17 @@ class FederationApp(App):
         row-span: 1;
         border: solid yellow;
         padding: 0 1;
+    }
+
+    #event-log-container {
+        column-span: 2;
+        border: solid dim;
+        padding: 0 1;
+    }
+
+    #event-log {
+        background: $surface;
+        height: 100%;
     }
 
     #input-container {
@@ -296,6 +307,9 @@ class FederationApp(App):
             with Vertical(id="worker-detail"):
                 yield WorkerOutputPanel(id="worker-output-panel")
 
+        with Horizontal(id="event-log-container"):
+            yield RichLog(id="event-log", highlight=True, markup=True)
+
         with Horizontal(id="input-container"):
             yield Input(placeholder="Enter message...", id="input")
 
@@ -308,6 +322,7 @@ class FederationApp(App):
         self.master_panel = self.query_one("#master-panel", MasterPanel)
         self.workers_panel = self.query_one("#workers-panel", WorkersPanel)
         self.worker_output = self.query_one("#worker-output-panel", WorkerOutputPanel)
+        self.event_log = self.query_one("#event-log", RichLog)
 
         # Subscribe to events
         self.federation.event_bus.subscribe(self.handle_event)
@@ -333,6 +348,9 @@ class FederationApp(App):
 
     def _process_event(self, event: Event) -> None:
         """Process event on the main thread."""
+        # Log all events to the event log for debugging
+        self._log_event(event)
+
         # Master events
         if event.type == EventType.MASTER_TEXT:
             self.chat.add_master_text(event.data.get("text", ""))
@@ -397,6 +415,29 @@ class FederationApp(App):
     def _refresh_workers(self) -> None:
         """Refresh the workers panel."""
         self.workers_panel.worker_data = dict(self.federation.state.list_workers())
+
+    def _log_event(self, event: Event) -> None:
+        """Log event to the debug event log."""
+        try:
+            # Format: [TYPE] (agent_id) {data}
+            event_type = event.type.value
+            agent_id = event.agent_id or ""
+
+            # Truncate long text data for readability
+            data = dict(event.data)
+            if "text" in data and len(data["text"]) > 50:
+                data["text"] = data["text"][:50] + "..."
+            if "result" in data and len(str(data["result"])) > 50:
+                data["result"] = str(data["result"])[:50] + "..."
+
+            if agent_id:
+                log_line = f"[{event_type}] ({agent_id}) {data}"
+            else:
+                log_line = f"[{event_type}] {data}"
+
+            self.event_log.write(Text(log_line, style="dim"))
+        except Exception:
+            pass  # Don't let logging errors break the app
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle user input."""
