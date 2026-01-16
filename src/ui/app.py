@@ -94,7 +94,11 @@ class ChatLog(RichLog):
     def _flush_buffer(self) -> None:
         """Write any buffered streaming text."""
         if self._streaming_buffer:
-            self.write(Text(self._streaming_buffer, style=self._streaming_style))
+            # Split by newlines and write each line separately
+            lines = self._streaming_buffer.split("\n")
+            for i, line in enumerate(lines):
+                if line:  # Skip empty lines
+                    self.write(Text(line, style=self._streaming_style))
             self._streaming_buffer = ""
 
     def add_user_message(self, text: str) -> None:
@@ -105,9 +109,15 @@ class ChatLog(RichLog):
         """Buffer streaming text from master."""
         self._streaming_style = "white"
         self._streaming_buffer += text
-        # Write on newlines or periodically
-        if "\n" in text or len(self._streaming_buffer) > 80:
-            self._flush_buffer()
+        # Flush complete lines, keep partial line in buffer
+        if "\n" in self._streaming_buffer:
+            parts = self._streaming_buffer.rsplit("\n", 1)
+            if len(parts) == 2:
+                complete, remainder = parts
+                for line in complete.split("\n"):
+                    if line:
+                        self.write(Text(line, style=self._streaming_style))
+                self._streaming_buffer = remainder
 
     def add_master_tool(self, tool_name: str) -> None:
         self._flush_buffer()
@@ -117,8 +127,15 @@ class ChatLog(RichLog):
         """Buffer streaming text from worker."""
         self._streaming_style = "dim"
         self._streaming_buffer += text
-        if "\n" in text or len(self._streaming_buffer) > 80:
-            self._flush_buffer()
+        # Flush complete lines, keep partial line in buffer
+        if "\n" in self._streaming_buffer:
+            parts = self._streaming_buffer.rsplit("\n", 1)
+            if len(parts) == 2:
+                complete, remainder = parts
+                for line in complete.split("\n"):
+                    if line:
+                        self.write(Text(line, style=self._streaming_style))
+                self._streaming_buffer = remainder
 
     def add_worker_start(self, agent_id: str) -> None:
         self._flush_buffer()
