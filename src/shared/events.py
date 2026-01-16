@@ -17,17 +17,11 @@ class EventType(Enum):
 
     # Worker events
     WORKER_SPAWNED = "worker_spawned"
-    WORKER_THINKING = "worker_thinking"
+    WORKER_STARTED = "worker_started"  # When worker begins executing
     WORKER_TEXT = "worker_text"
     WORKER_TOOL_CALL = "worker_tool_call"
-    WORKER_TOOL_RESULT = "worker_tool_result"
     WORKER_DONE = "worker_done"
     WORKER_ERROR = "worker_error"
-    WORKER_TERMINATED = "worker_terminated"
-
-    # Delegation events
-    DELEGATION_STARTED = "delegation_started"
-    DELEGATION_COMPLETED = "delegation_completed"
 
     # User-facing
     STATUS_UPDATE = "status_update"
@@ -80,6 +74,9 @@ class EventBus:
     def worker_spawned(self, agent_id: str, agent_type: str) -> None:
         self.emit(Event.create(EventType.WORKER_SPAWNED, agent_id=agent_id, agent_type=agent_type))
 
+    def worker_started(self, agent_id: str, task: str) -> None:
+        self.emit(Event.create(EventType.WORKER_STARTED, agent_id=agent_id, task=task))
+
     def worker_text(self, agent_id: str, text: str) -> None:
         self.emit(Event.create(EventType.WORKER_TEXT, agent_id=agent_id, text=text))
 
@@ -88,12 +85,6 @@ class EventBus:
 
     def worker_done(self, agent_id: str, result: str) -> None:
         self.emit(Event.create(EventType.WORKER_DONE, agent_id=agent_id, result=result))
-
-    def delegation_started(self, delegation_id: str, agent_id: str, task: str) -> None:
-        self.emit(Event.create(EventType.DELEGATION_STARTED, delegation_id=delegation_id, agent_id=agent_id, task=task))
-
-    def delegation_completed(self, delegation_id: str, agent_id: str, result: str) -> None:
-        self.emit(Event.create(EventType.DELEGATION_COMPLETED, delegation_id=delegation_id, agent_id=agent_id, result=result))
 
     def status_update(self, message: str) -> None:
         self.emit(Event.create(EventType.STATUS_UPDATE, message=message))

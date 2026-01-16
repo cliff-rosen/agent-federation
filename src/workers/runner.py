@@ -55,6 +55,9 @@ class WorkerRunner:
         allowed_tools: list[str],
     ) -> None:
         """Run a worker using Claude Agent SDK."""
+        # Emit started event so UI can refresh
+        self.events.worker_started(worker_id, task)
+
         try:
             options = ClaudeAgentOptions(
                 system_prompt=system_prompt,

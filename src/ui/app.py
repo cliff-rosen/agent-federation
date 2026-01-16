@@ -259,7 +259,12 @@ class FederationApp(App):
             self._refresh_workers()
             agent_type = event.data.get("agent_type", "")
             agent_id = event.data.get("agent_id", "")
-            self.chat.add_status(f"Spawned {agent_type} worker: {agent_id[:4]}")
+            self.chat.add_status(f"Spawned {agent_type} worker: {agent_id}")
+
+        elif event.type == EventType.WORKER_STARTED:
+            self._refresh_workers()
+            agent_id = event.data.get("agent_id", "")
+            self.chat.add_status(f"Worker {agent_id} started")
 
         elif event.type == EventType.WORKER_TEXT:
             pass  # Workers run in background, we show result when done
@@ -267,7 +272,7 @@ class FederationApp(App):
         elif event.type == EventType.WORKER_DONE:
             self._refresh_workers()
             agent_id = event.data.get("agent_id", "")
-            self.chat.add_status(f"Worker {agent_id[:4]} completed")
+            self.chat.add_status(f"Worker {agent_id} completed")
 
         elif event.type == EventType.STATUS_UPDATE:
             self.chat.add_status(event.data.get("message", ""))
