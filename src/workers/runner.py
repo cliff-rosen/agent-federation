@@ -11,11 +11,32 @@ if TYPE_CHECKING:
     from ..federation import Federation
 
 # Try to import Claude Agent SDK, fall back to simple mode if not available
+HAS_SDK = False
+ToolUseBlock = None
+ToolResultBlock = None
+
 try:
-    from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions, AssistantMessage, TextBlock, ResultMessage
+    from claude_agent_sdk import (
+        ClaudeSDKClient,
+        ClaudeAgentOptions,
+        AssistantMessage,
+        TextBlock,
+        ResultMessage,
+    )
     HAS_SDK = True
+    # These might not exist in all SDK versions
+    try:
+        from claude_agent_sdk import ToolUseBlock as _ToolUseBlock
+        ToolUseBlock = _ToolUseBlock
+    except ImportError:
+        pass
+    try:
+        from claude_agent_sdk import ToolResultBlock as _ToolResultBlock
+        ToolResultBlock = _ToolResultBlock
+    except ImportError:
+        pass
 except ImportError:
-    HAS_SDK = False
+    pass
 
 
 class WorkerRunner:
@@ -67,10 +88,27 @@ class WorkerRunner:
 
         try:
             if not HAS_SDK:
-                # Fallback: simple simulation for testing
-                events.worker_text(worker_id, "[SDK not installed - running in test mode]\n")
+                # Fallback: simulation for testing with progress updates
+                events.worker_text(worker_id, "[SDK not installed - running in test mode]\n\n")
+
+                # Simulate some work with progress
+                events.worker_text(worker_id, "Analyzing task...\n")
+                await asyncio.sleep(1)
+
+                events.worker_tool_call(worker_id, "WebSearch", {"query": task})
+                events.worker_text(worker_id, "[Calling WebSearch...]\n")
                 await asyncio.sleep(2)
-                result_text = f"[Test mode] Would have completed task: {task}"
+                events.worker_text(worker_id, "[Tool completed]\n\n")
+
+                events.worker_text(worker_id, "Processing results...\n")
+                await asyncio.sleep(1)
+
+                events.worker_text(worker_id, "Generating response...\n")
+                await asyncio.sleep(1)
+
+                result_text = f"[Test mode] Simulated completion of task: {task}\n\nThis is a placeholder response that would contain the actual results from the Claude Agent SDK."
+                events.worker_text(worker_id, f"\n{result_text}\n")
+
                 state.complete_task(worker_id, result_text)
                 events.worker_done(worker_id, result_text)
                 return
@@ -99,10 +137,18 @@ class WorkerRunner:
                             if isinstance(block, TextBlock):
                                 result_text += block.text
                                 events.worker_text(worker_id, block.text)
+                            elif ToolUseBlock is not None and isinstance(block, ToolUseBlock):
+                                # Emit tool call event
+                                tool_name = getattr(block, 'name', 'unknown')
+                                events.worker_tool_call(worker_id, tool_name, {})
+                                events.worker_text(worker_id, f"\n[Calling {tool_name}...]\n")
+                            elif ToolResultBlock is not None and isinstance(block, ToolResultBlock):
+                                # Tool completed - emit some feedback
+                                events.worker_text(worker_id, "[Tool completed]\n")
 
                     elif isinstance(message, ResultMessage):
                         # Task complete
-                        if message.result:
+                        if hasattr(message, 'result') and message.result:
                             result_text = message.result
 
             # Mark complete

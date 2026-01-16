@@ -384,12 +384,12 @@ class FederationApp(App):
             # Worker output
             with Vertical(id="worker-output-area"):
                 yield Label("Worker Output", id="filter-label")
-                yield RichLog(id="worker-output", highlight=True, markup=True)
+                yield RichLog(id="worker-output", highlight=True, markup=True, wrap=False)
 
         # Right column: Event log
         with Vertical(id="event-log-area"):
             yield Label("Event Log", classes="section-title")
-            yield RichLog(id="event-log", highlight=True, markup=True)
+            yield RichLog(id="event-log", highlight=True, markup=True, wrap=False)
 
         yield Footer()
 
