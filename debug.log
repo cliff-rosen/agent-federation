@@ -1,0 +1,50 @@
+_refresh_workers: got 0 workers from state
+_refresh_workers: got 1 workers from state
+  - ce16fa74: researcher (idle)
+_refresh_workers: got 1 workers from state
+  - ce16fa74: researcher (working)
+_refresh_workers: got 1 workers from state
+  - ce16fa74: researcher (done)
+_refresh_workers: got 0 workers from state
+_refresh_workers: got 1 workers from state
+  - d0973854: researcher (idle)
+_refresh_workers: got 0 workers from state
+_refresh_workers: got 1 workers from state
+  - 697b92ef: researcher (idle)
+_refresh_workers: got 0 workers from state
+_refresh_workers: got 1 workers from state
+  - 2e3f89a7: researcher (idle)
+_refresh_workers: got 1 workers from state
+  - 2e3f89a7: researcher (working)
+_refresh_workers: got 0 workers from state
+_refresh_workers: got 1 workers from state
+  - 3cc862d6: researcher (idle)
+_refresh_workers: got 1 workers from state
+  - 3cc862d6: researcher (working)
+_refresh_workers: got 2 workers from state
+  - 3cc862d6: researcher (working)
+  - 7cbab887: researcher (idle)
+_refresh_workers: got 3 workers from state
+  - 3cc862d6: researcher (working)
+  - 7cbab887: researcher (idle)
+  - 541de6fd: researcher (idle)
+_refresh_workers: got 3 workers from state
+  - 3cc862d6: researcher (working)
+  - 7cbab887: researcher (working)
+  - 541de6fd: researcher (idle)
+_refresh_workers: got 3 workers from state
+  - 3cc862d6: researcher (done)
+  - 7cbab887: researcher (working)
+  - 541de6fd: researcher (idle)
+_refresh_workers: got 3 workers from state
+  - 3cc862d6: researcher (done)
+  - 7cbab887: researcher (working)
+  - 541de6fd: researcher (working)
+_refresh_workers: got 3 workers from state
+  - 3cc862d6: researcher (idle)
+  - 7cbab887: researcher (done)
+  - 541de6fd: researcher (working)
+_refresh_workers: got 3 workers from state
+  - 3cc862d6: researcher (idle)
+  - 7cbab887: researcher (idle)
+  - 541de6fd: researcher (done)

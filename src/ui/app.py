@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 from dataclasses import dataclass
 
 from textual.app import App, ComposeResult
 from textual.containers import Vertical, Container
-from textual.widgets import Header, Footer, Static, Input, RichLog, Label, ListView, ListItem
+from textual.widgets import Header, Footer, Static, Input, RichLog, Label
 from textual.message import Message
 from textual import work
 from rich.text import Text
 
 from ..shared.events import Event, EventType
-from ..shared.types import Worker, WorkerStatus
+from ..shared.types import Worker
 
 if TYPE_CHECKING:
     from ..federation import Federation
@@ -34,30 +34,23 @@ class WorkerFilterChanged(Message):
         super().__init__()
 
 
-class WorkerListItem(ListItem):
-    """A clickable worker item."""
+class ClickableWorkerItem(Static):
+    """A clickable worker item that calls parent's select method when clicked."""
 
-    def __init__(self, worker_id: str, worker: Worker, selected: bool = False) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        worker_id: str | None,
+        text: str,
+        on_select: Callable[[str | None], None],
+        **kwargs
+    ) -> None:
+        super().__init__(text, **kwargs)
         self.worker_id = worker_id
-        self.worker = worker
-        self._selected = selected
+        self._on_select = on_select
 
-    def compose(self) -> ComposeResult:
-        worker = self.worker
-        if worker.status == WorkerStatus.IDLE:
-            icon = "○"
-            style = "dim"
-        elif worker.status == WorkerStatus.WORKING:
-            icon = "●"
-            style = "yellow bold"
-        else:  # DONE
-            icon = "✓"
-            style = "green"
-
-        prefix = "▶ " if self._selected else "  "
-        label = f"{prefix}{icon} {self.worker_id[:8]} {worker.type}"
-        yield Label(label, classes=style)
+    def on_click(self, _event) -> None:
+        """Call the selection callback."""
+        self._on_select(self.worker_id)
 
 
 class WorkersList(Static):
@@ -87,45 +80,55 @@ class WorkersList(Static):
         self._rebuild_list()
 
     def compose(self) -> ComposeResult:
-        yield ListView(id="workers-listview")
+        yield Vertical(id="workers-container")
+
+    def on_mount(self) -> None:
+        """Rebuild list once widget is mounted."""
+        self._rebuild_list()
+
+    def _handle_selection(self, worker_id: str | None) -> None:
+        """Handle a worker being clicked."""
+        # Toggle if clicking the same one
+        if worker_id == self._selected_id:
+            self._selected_id = None
+        else:
+            self._selected_id = worker_id
+        # Defer rebuild and notification
+        self.call_later(self._do_selection_update)
+
+    def _do_selection_update(self) -> None:
+        """Deferred selection update."""
+        self._rebuild_list()
+        self.post_message(WorkerFilterChanged(self._selected_id))
 
     def _rebuild_list(self) -> None:
         """Rebuild the worker list."""
         try:
-            list_view = self.query_one("#workers-listview", ListView)
+            container = self.query_one("#workers-container", Vertical)
         except Exception:
             return  # Widget not mounted yet
 
-        list_view.clear()
+        container.remove_children()
 
         if not self._workers:
-            list_view.append(ListItem(Label("No workers yet", classes="dim")))
+            container.mount(Label("No workers yet", classes="dim"))
             return
 
         # Add "All workers" option
         all_selected = self._selected_id is None
         all_prefix = "▶ " if all_selected else "  "
-        all_item = ListItem(Label(f"{all_prefix}◉ ALL WORKERS", classes="bold" if all_selected else ""))
-        all_item.worker_id = None  # type: ignore
-        list_view.append(all_item)
+        all_classes = "bold worker-item" if all_selected else "worker-item"
+        container.mount(ClickableWorkerItem(None, f"{all_prefix}◉ ALL WORKERS", self._handle_selection, classes=all_classes))
 
         # Add each worker
         for worker_id, worker in self._workers.items():
             is_selected = self._selected_id == worker_id
-            item = WorkerListItem(worker_id, worker, selected=is_selected)
-            list_view.append(item)
-
-    def on_list_view_selected(self, event: ListView.Selected) -> None:
-        """Handle worker selection."""
-        item = event.item
-        if hasattr(item, 'worker_id'):
-            worker_id = item.worker_id
-            # Toggle: if already selected, deselect (show all)
-            if worker_id == self.selected_id:
-                self.selected_id = None
-            else:
-                self.selected_id = worker_id
-            self.post_message(WorkerFilterChanged(self.selected_id))
+            icon = {"idle": "○", "working": "●", "done": "✓"}.get(worker.status.value, "?")
+            color = {"idle": "dim", "working": "yellow", "done": "green"}.get(worker.status.value, "")
+            prefix = "▶ " if is_selected else "  "
+            text = f"{prefix}{icon} {worker_id[:8]} {worker.type}"
+            classes = f"{color} worker-item" if color else "worker-item"
+            container.mount(ClickableWorkerItem(worker_id, text, self._handle_selection, classes=classes))
 
 
 class WorkerDetails(Static):
@@ -271,12 +274,21 @@ class FederationApp(App):
         height: 100%;
     }
 
-    #workers-listview {
-        height: 100%;
+    #workers-container {
+        height: auto;
     }
 
     WorkersList {
-        height: 100%;
+        height: auto;
+    }
+
+    .worker-item {
+        height: 1;
+        padding: 0 1;
+    }
+
+    .worker-item:hover {
+        background: $surface-lighten-1;
     }
 
     #worker-details {
@@ -486,7 +498,11 @@ class FederationApp(App):
 
     def _refresh_workers(self) -> None:
         """Refresh the workers list and details."""
-        workers = dict(self.federation.state.list_workers())
+        with open("debug.log", "a") as f:
+            workers = dict(self.federation.state.list_workers())
+            f.write(f"_refresh_workers: got {len(workers)} workers from state\n")
+            for wid, w in workers.items():
+                f.write(f"  - {wid}: {w.type} ({w.status.value})\n")
         self.workers_list.workers = workers
         # Also refresh details if a worker is selected (status may have changed)
         if self.filter_worker_id:
