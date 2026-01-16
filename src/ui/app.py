@@ -5,200 +5,75 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical
-from textual.widgets import Header, Footer, Static, Input, RichLog, ListView, ListItem, Label
+from textual.containers import Vertical, Container
+from textual.widgets import Header, Footer, Static, Input, RichLog, Label
 from textual.reactive import reactive
-from textual.message import Message
 from textual import work
 from rich.text import Text
 from rich.panel import Panel
+from rich.table import Table
 
 from ..shared.events import Event, EventType
-from ..shared.types import WorkerStatus, MasterStatus
+from ..shared.types import WorkerStatus
 
 if TYPE_CHECKING:
     from ..federation import Federation
 
 
-class WorkerSelected(Message):
-    """Message sent when a worker is selected."""
-    def __init__(self, worker_id: str | None) -> None:
-        self.worker_id = worker_id
-        super().__init__()
+class MasterStatus_Widget(Static):
+    """Shows master agent status."""
+
+    status: reactive[str] = reactive("idle")
+
+    def render(self) -> Text:
+        if self.status == "idle":
+            return Text("Master: idle", style="dim")
+        elif self.status == "thinking":
+            return Text("Master: thinking...", style="yellow bold")
+        else:
+            return Text(f"Master: {self.status}", style="cyan bold")
 
 
-class MasterPanel(Static):
-    """Panel showing master agent status."""
+class WorkersList(Static):
+    """Shows all workers with their status."""
 
-    status: reactive[MasterStatus] = reactive(MasterStatus.IDLE)
-    current_tool: reactive[str | None] = reactive(None)
+    workers: reactive[dict] = reactive({}, always_update=True)
 
     def render(self) -> Panel:
-        if self.status == MasterStatus.IDLE:
-            status_text = Text("idle", style="dim")
-        elif self.status == MasterStatus.THINKING:
-            status_text = Text("thinking...", style="yellow")
-        elif self.status == MasterStatus.CALLING_TOOL:
-            tool = self.current_tool or "unknown"
-            status_text = Text(f"calling {tool}", style="cyan")
+        if not self.workers:
+            content = Text("No workers", style="dim")
         else:
-            status_text = Text(str(self.status), style="white")
+            table = Table(box=None, show_header=False, padding=(0, 1))
+            table.add_column("Status", width=3)
+            table.add_column("ID", width=10)
+            table.add_column("Type", width=12)
+            table.add_column("Task", overflow="ellipsis")
 
-        return Panel(status_text, title="Master", border_style="green")
+            for worker_id, worker in self.workers.items():
+                if worker.status == WorkerStatus.IDLE:
+                    icon = Text("○", style="dim")
+                    status_style = "dim"
+                elif worker.status == WorkerStatus.WORKING:
+                    icon = Text("●", style="yellow bold")
+                    status_style = "yellow"
+                else:  # DONE
+                    icon = Text("✓", style="green bold")
+                    status_style = "green"
 
+                task = worker.current_task or ""
+                if len(task) > 30:
+                    task = task[:27] + "..."
 
-class WorkerItem(ListItem):
-    """A clickable worker item."""
+                table.add_row(
+                    icon,
+                    Text(worker_id[:8], style=status_style),
+                    Text(worker.type, style=status_style),
+                    Text(task, style="dim"),
+                )
 
-    def __init__(self, worker_id: str, worker) -> None:
-        super().__init__()
-        self.worker_id = worker_id
-        self.worker = worker
+            content = table
 
-    def compose(self) -> ComposeResult:
-        worker = self.worker
-        if worker.status == WorkerStatus.IDLE:
-            icon = "○"
-            style = "dim"
-        elif worker.status == WorkerStatus.WORKING:
-            icon = "●"
-            style = "yellow bold"
-        else:  # DONE
-            icon = "✓"
-            style = "green"
-
-        label = f"{icon} {worker.type}-{self.worker_id[:4]} [{worker.status.value}]"
-        yield Label(label, classes=style)
-
-
-class WorkersPanel(Static):
-    """Panel showing all workers - click to select."""
-
-    worker_data: reactive[dict] = reactive({}, always_update=True)
-    selected_id: reactive[str | None] = reactive(None)
-
-    def compose(self) -> ComposeResult:
-        yield ListView(id="workers-list")
-
-    def watch_worker_data(self, worker_data: dict) -> None:
-        """Update the list when workers change."""
-        list_view = self.query_one("#workers-list", ListView)
-        list_view.clear()
-
-        if not worker_data:
-            list_view.append(ListItem(Label("No workers", classes="dim")))
-            return
-
-        for worker_id, worker in worker_data.items():
-            item = WorkerItem(worker_id, worker)
-            if worker_id == self.selected_id:
-                item.highlighted = True
-            list_view.append(item)
-
-    def on_list_view_selected(self, event: ListView.Selected) -> None:
-        """Handle worker selection."""
-        if isinstance(event.item, WorkerItem):
-            self.selected_id = event.item.worker_id
-            self.post_message(WorkerSelected(event.item.worker_id))
-
-
-class WorkerOutputPanel(Static):
-    """Panel showing selected worker's streaming output."""
-
-    worker_id: reactive[str | None] = reactive(None)
-
-    def compose(self) -> ComposeResult:
-        yield RichLog(id="worker-output", highlight=True, markup=True)
-
-    @property
-    def log(self) -> RichLog:
-        return self.query_one("#worker-output", RichLog)
-
-    def set_worker(self, worker_id: str | None, worker=None) -> None:
-        """Set the worker to display."""
-        self.worker_id = worker_id
-        try:
-            self.log.clear()
-            if worker_id and worker:
-                self.log.write(Text(f"Worker: {worker.type}-{worker_id[:4]}", style="bold"))
-                if worker.current_task:
-                    self.log.write(Text(f"Task: {worker.current_task}", style="dim"))
-                self.log.write(Text("─" * 30, style="dim"))
-        except Exception:
-            pass  # Widget not ready yet
-
-    def add_text(self, text: str) -> None:
-        """Add streaming text."""
-        try:
-            self.log.write(Text(text, style="white"))
-        except Exception:
-            pass
-
-    def add_tool_call(self, tool_name: str) -> None:
-        """Add tool call."""
-        try:
-            self.log.write(Text(f"[{tool_name}]", style="cyan"))
-        except Exception:
-            pass
-
-    def add_done(self, result: str) -> None:
-        """Mark complete."""
-        try:
-            self.log.write(Text("─" * 30, style="dim"))
-            self.log.write(Text("Done", style="green bold"))
-        except Exception:
-            pass
-
-
-class ChatLog(RichLog):
-    """Chat log with message styling."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._streaming_buffer = ""
-        self._streaming_style = "white"
-
-    def _flush_buffer(self) -> None:
-        """Write any buffered streaming text."""
-        if self._streaming_buffer:
-            lines = self._streaming_buffer.split("\n")
-            for line in lines:
-                if line:
-                    self.write(Text(line, style=self._streaming_style))
-            self._streaming_buffer = ""
-
-    def add_user_message(self, text: str) -> None:
-        self._flush_buffer()
-        self.write(Text(f"> {text}", style="bold green"))
-
-    def add_master_text(self, text: str) -> None:
-        """Buffer streaming text from master."""
-        self._streaming_style = "white"
-        self._streaming_buffer += text
-        if "\n" in self._streaming_buffer:
-            parts = self._streaming_buffer.rsplit("\n", 1)
-            if len(parts) == 2:
-                complete, remainder = parts
-                for line in complete.split("\n"):
-                    if line:
-                        self.write(Text(line, style=self._streaming_style))
-                self._streaming_buffer = remainder
-
-    def add_tool_call(self, tool_name: str) -> None:
-        self._flush_buffer()
-        self.write(Text(f"[{tool_name}]", style="cyan"))
-
-    def add_status(self, message: str) -> None:
-        self._flush_buffer()
-        self.write(Text(f">> {message}", style="blue"))
-
-    def add_error(self, message: str) -> None:
-        self._flush_buffer()
-        self.write(Text(f"[error] {message}", style="red bold"))
-
-    def add_separator(self) -> None:
-        self._flush_buffer()
-        self.write(Text("─" * 40, style="dim"))
+        return Panel(content, title="Workers", border_style="blue")
 
 
 class FederationApp(App):
@@ -207,140 +82,112 @@ class FederationApp(App):
     CSS = """
     Screen {
         layout: grid;
-        grid-size: 2 4;
-        grid-columns: 3fr 1fr;
-        grid-rows: 2fr 1fr 6 auto;
+        grid-size: 2 3;
+        grid-columns: 2fr 1fr;
+        grid-rows: 1fr 1fr auto;
     }
 
-    #chat-container {
-        row-span: 1;
+    #left-top {
         border: solid green;
         padding: 0 1;
     }
 
-    #sidebar-top {
-        row-span: 1;
+    #right-top {
         padding: 0 1;
-        min-width: 30;
     }
 
-    #sidebar-bottom {
-        row-span: 1;
-        padding: 0 1;
-        min-width: 30;
-        border: solid blue;
-    }
-
-    #worker-detail {
-        row-span: 1;
+    #left-bottom {
         border: solid yellow;
         padding: 0 1;
     }
 
-    #event-log-container {
-        column-span: 2;
-        border: solid dim;
+    #right-bottom {
+        border: solid gray;
         padding: 0 1;
     }
 
-    #event-log {
-        background: $surface;
-        height: 100%;
-    }
-
-    #input-container {
+    #input-row {
         column-span: 2;
         height: 3;
         padding: 0 1;
     }
 
-    ChatLog {
-        background: $surface;
+    #chat-log {
+        height: 100%;
     }
 
     #worker-output {
-        background: $surface;
         height: 100%;
     }
 
-    MasterPanel {
-        height: auto;
+    #event-log {
+        height: 100%;
+    }
+
+    MasterStatus_Widget {
+        height: 1;
         margin-bottom: 1;
     }
 
-    WorkersPanel {
+    WorkersList {
         height: 100%;
-    }
-
-    #workers-list {
-        height: 100%;
-    }
-
-    Input {
-        dock: bottom;
     }
     """
 
     BINDINGS = [
         ("ctrl+c", "quit", "Quit"),
         ("ctrl+l", "clear", "Clear"),
-        ("escape", "deselect", "Deselect"),
     ]
 
     def __init__(self, federation: Federation) -> None:
         super().__init__()
         self.federation = federation
-        self.selected_worker_id: str | None = None
+        # Store output per worker so we don't lose it when switching
+        self.worker_outputs: dict[str, list[str]] = {}
+        self.active_worker_id: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
 
-        with Horizontal():
-            with Vertical(id="chat-container"):
-                yield ChatLog(id="chat", highlight=True, markup=True)
+        # Top row: Chat (left), Master+Workers (right)
+        with Container(id="left-top"):
+            yield Label("Chat with Master", classes="title")
+            yield RichLog(id="chat-log", highlight=True, markup=True)
 
-            with Vertical(id="sidebar-top"):
-                yield MasterPanel(id="master-panel")
-                yield WorkersPanel(id="workers-panel")
+        with Vertical(id="right-top"):
+            yield MasterStatus_Widget(id="master-status")
+            yield WorkersList(id="workers-list")
 
-        with Horizontal():
-            with Vertical(id="worker-detail"):
-                yield WorkerOutputPanel(id="worker-output-panel")
+        # Bottom row: Worker output (left), Event log (right)
+        with Container(id="left-bottom"):
+            yield Label("Worker Output", classes="title")
+            yield RichLog(id="worker-output", highlight=True, markup=True)
 
-        with Horizontal(id="event-log-container"):
+        with Container(id="right-bottom"):
+            yield Label("Event Log", classes="title")
             yield RichLog(id="event-log", highlight=True, markup=True)
 
-        with Horizontal(id="input-container"):
-            yield Input(placeholder="Enter message...", id="input")
+        # Input row
+        with Container(id="input-row"):
+            yield Input(placeholder="Enter message for master agent...", id="input")
 
         yield Footer()
 
     def on_mount(self) -> None:
         """Set up event handling when app mounts."""
         self.query_one("#input", Input).focus()
-        self.chat = self.query_one("#chat", ChatLog)
-        self.master_panel = self.query_one("#master-panel", MasterPanel)
-        self.workers_panel = self.query_one("#workers-panel", WorkersPanel)
-        self.worker_output = self.query_one("#worker-output-panel", WorkerOutputPanel)
+
+        # Get widget references
+        self.chat_log = self.query_one("#chat-log", RichLog)
+        self.worker_output = self.query_one("#worker-output", RichLog)
         self.event_log = self.query_one("#event-log", RichLog)
+        self.master_status = self.query_one("#master-status", MasterStatus_Widget)
+        self.workers_list = self.query_one("#workers-list", WorkersList)
 
         # Subscribe to events
         self.federation.event_bus.subscribe(self.handle_event)
 
-        self.chat.add_status("Agent Federation ready")
-        self.chat.add_status("Click a worker to see its output")
-
-    def on_worker_selected(self, message: WorkerSelected) -> None:
-        """Handle worker selection."""
-        self.selected_worker_id = message.worker_id
-        worker = self.federation.state.get_worker(message.worker_id) if message.worker_id else None
-        self.worker_output.set_worker(message.worker_id, worker)
-
-    def action_deselect(self) -> None:
-        """Deselect worker."""
-        self.selected_worker_id = None
-        self.workers_panel.selected_id = None
-        self.worker_output.set_worker(None, None)
+        self.chat_log.write(Text("Agent Federation ready. Type a message to begin.", style="blue"))
 
     def handle_event(self, event: Event) -> None:
         """Handle events from the federation."""
@@ -348,96 +195,128 @@ class FederationApp(App):
 
     def _process_event(self, event: Event) -> None:
         """Process event on the main thread."""
-        # Log all events to the event log for debugging
+        # Always log to event log
         self._log_event(event)
 
-        # Master events
+        # Route by event type
         if event.type == EventType.MASTER_TEXT:
-            self.chat.add_master_text(event.data.get("text", ""))
+            text = event.data.get("text", "")
+            if text:
+                self.chat_log.write(Text(text, style="white"), scroll_end=True)
 
         elif event.type == EventType.MASTER_TOOL_CALL:
             tool_name = event.data.get("tool_name", "unknown")
-            self.chat.add_tool_call(tool_name)
-            self.master_panel.status = MasterStatus.CALLING_TOOL
-            self.master_panel.current_tool = tool_name
+            self.chat_log.write(Text(f"[calling {tool_name}]", style="cyan"), scroll_end=True)
+            self.master_status.status = f"calling {tool_name}"
 
         elif event.type == EventType.MASTER_TOOL_RESULT:
-            self.master_panel.status = MasterStatus.THINKING
+            self.master_status.status = "thinking"
 
         elif event.type == EventType.MASTER_DONE:
-            self.chat.add_separator()
-            self.master_panel.status = MasterStatus.IDLE
-            self.master_panel.current_tool = None
+            self.chat_log.write(Text("─" * 30, style="dim"), scroll_end=True)
+            self.master_status.status = "idle"
 
-        # Worker events
         elif event.type == EventType.WORKER_SPAWNED:
             self._refresh_workers()
             agent_type = event.data.get("agent_type", "")
             agent_id = event.agent_id or ""
-            self.chat.add_status(f"Spawned {agent_type} worker: {agent_id}")
+            self.chat_log.write(
+                Text(f">> Spawned {agent_type} worker: {agent_id}", style="blue"),
+                scroll_end=True
+            )
+            # Initialize output storage for this worker
+            self.worker_outputs[agent_id] = []
 
         elif event.type == EventType.WORKER_STARTED:
             self._refresh_workers()
             agent_id = event.agent_id or ""
-            self.chat.add_status(f"Worker {agent_id} started")
-            # Auto-select the started worker
-            self.selected_worker_id = agent_id
-            self.workers_panel.selected_id = agent_id
-            worker = self.federation.state.get_worker(agent_id)
-            self.worker_output.set_worker(agent_id, worker)
+            task = event.data.get("task", "")
+            self.chat_log.write(
+                Text(f">> Worker {agent_id} started: {task[:50]}", style="blue"),
+                scroll_end=True
+            )
+            # Switch to this worker's output
+            self._switch_to_worker(agent_id)
 
         elif event.type == EventType.WORKER_TEXT:
             agent_id = event.agent_id or ""
             text = event.data.get("text", "")
-            # Show in worker output if this worker is selected
-            if agent_id == self.selected_worker_id:
-                self.worker_output.add_text(text)
+            if text:
+                # Store the output
+                if agent_id not in self.worker_outputs:
+                    self.worker_outputs[agent_id] = []
+                self.worker_outputs[agent_id].append(text)
+
+                # Display if this is the active worker
+                if agent_id == self.active_worker_id:
+                    self.worker_output.write(Text(text, style="white"), scroll_end=True)
 
         elif event.type == EventType.WORKER_TOOL_CALL:
             agent_id = event.agent_id or ""
             tool_name = event.data.get("tool_name", "")
-            # Show in worker output if this worker is selected
-            if agent_id == self.selected_worker_id:
-                self.worker_output.add_tool_call(tool_name)
+            if agent_id == self.active_worker_id:
+                self.worker_output.write(
+                    Text(f"[{tool_name}]", style="cyan"),
+                    scroll_end=True
+                )
 
         elif event.type == EventType.WORKER_DONE:
             self._refresh_workers()
             agent_id = event.agent_id or ""
-            result = event.data.get("result", "")
-            self.chat.add_status(f"Worker {agent_id} completed")
-            # Update worker output if selected
-            if agent_id == self.selected_worker_id:
-                self.worker_output.add_done(result)
+            self.chat_log.write(
+                Text(f">> Worker {agent_id} completed", style="green"),
+                scroll_end=True
+            )
+            if agent_id == self.active_worker_id:
+                self.worker_output.write(
+                    Text("─── DONE ───", style="green bold"),
+                    scroll_end=True
+                )
 
         elif event.type == EventType.STATUS_UPDATE:
-            self.chat.add_status(event.data.get("message", ""))
+            msg = event.data.get("message", "")
+            self.chat_log.write(Text(f">> {msg}", style="blue"), scroll_end=True)
 
     def _refresh_workers(self) -> None:
-        """Refresh the workers panel."""
-        self.workers_panel.worker_data = dict(self.federation.state.list_workers())
+        """Refresh the workers list."""
+        self.workers_list.workers = dict(self.federation.state.list_workers())
+
+    def _switch_to_worker(self, worker_id: str) -> None:
+        """Switch worker output panel to show a specific worker."""
+        self.active_worker_id = worker_id
+        self.worker_output.clear()
+        self.worker_output.write(
+            Text(f"=== Worker {worker_id} ===", style="bold yellow"),
+            scroll_end=True
+        )
+        # Replay any stored output for this worker
+        if worker_id in self.worker_outputs:
+            for text in self.worker_outputs[worker_id]:
+                self.worker_output.write(Text(text, style="white"), scroll_end=True)
 
     def _log_event(self, event: Event) -> None:
-        """Log event to the debug event log."""
+        """Log event to the event log."""
         try:
-            # Format: [TYPE] (agent_id) {data}
             event_type = event.type.value
             agent_id = event.agent_id or ""
 
-            # Truncate long text data for readability
-            data = dict(event.data)
-            if "text" in data and len(data["text"]) > 50:
-                data["text"] = data["text"][:50] + "..."
-            if "result" in data and len(str(data["result"])) > 50:
-                data["result"] = str(data["result"])[:50] + "..."
+            # Format data, truncating long values
+            data_parts = []
+            for k, v in event.data.items():
+                v_str = str(v)
+                if len(v_str) > 40:
+                    v_str = v_str[:37] + "..."
+                data_parts.append(f"{k}={v_str}")
+            data_str = ", ".join(data_parts) if data_parts else ""
 
             if agent_id:
-                log_line = f"[{event_type}] ({agent_id}) {data}"
+                line = f"[{event_type}] ({agent_id}) {data_str}"
             else:
-                log_line = f"[{event_type}] {data}"
+                line = f"[{event_type}] {data_str}"
 
-            self.event_log.write(Text(log_line, style="dim"))
+            self.event_log.write(Text(line, style="dim"), scroll_end=True)
         except Exception:
-            pass  # Don't let logging errors break the app
+            pass
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle user input."""
@@ -446,8 +325,8 @@ class FederationApp(App):
             return
 
         event.input.value = ""
-        self.chat.add_user_message(message)
-        self.master_panel.status = MasterStatus.THINKING
+        self.chat_log.write(Text(f"> {message}", style="bold green"), scroll_end=True)
+        self.master_status.status = "thinking"
         self.run_master(message)
 
     @work(thread=True, exclusive=True)
@@ -456,17 +335,17 @@ class FederationApp(App):
         try:
             self.federation.run(message)
         except Exception as e:
-            self.call_from_thread(self.chat.add_error, str(e))
-        finally:
             self.call_from_thread(
-                setattr, self.master_panel, "status", MasterStatus.IDLE
+                self.chat_log.write,
+                Text(f"[ERROR] {e}", style="red bold")
             )
+        finally:
+            self.call_from_thread(setattr, self.master_status, "status", "idle")
 
     def action_clear(self) -> None:
         """Clear the chat log."""
-        self.chat.clear()
+        self.chat_log.clear()
 
     def action_quit(self) -> None:
         """Quit the app."""
-        self.workers.cancel_all()
         self.exit()
