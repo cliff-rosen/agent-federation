@@ -23,21 +23,20 @@ def main():
     workspace_path = os.path.join(os.path.dirname(__file__), "workspace")
     os.makedirs(workspace_path, exist_ok=True)
 
-    # Create shared event bus
+    # Create shared components
     event_bus = EventBus()
-
-    # Create state manager
     state_manager = StateManager(workspace_path=workspace_path)
 
-    # Create master agent with shared state and events
+    # Create master agent
     master = MasterAgent(
         workspace_path=workspace_path,
         state_manager=state_manager,
         event_bus=event_bus,
     )
 
-    # Create worker runner
+    # Create worker runner (uses state_manager to update worker status)
     worker_runner = WorkerRunner(
+        state_manager=state_manager,
         event_bus=event_bus,
         workspace_path=workspace_path,
     )

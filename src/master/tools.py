@@ -1,20 +1,17 @@
-"""Master agent orchestration tools.
-
-These are the tools available to the master agent for managing the federation.
-"""
+"""Master agent orchestration tools."""
 
 from typing import Any
 
-from ..shared.types import Intention, IntentionType
+from ..shared.types import Intention
 from ..shared.events import EventBus
 from .state import StateManager
 
 
-# Tool definitions in Anthropic API format
+# Tool definitions for the master agent
 MASTER_TOOLS = [
     {
-        "name": "list_agent_types",
-        "description": "View all available agent templates that can be spawned.",
+        "name": "list_worker_types",
+        "description": "View all available worker types that can be spawned.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -22,8 +19,8 @@ MASTER_TOOLS = [
         },
     },
     {
-        "name": "list_running_agents",
-        "description": "View all currently running worker agents and their status.",
+        "name": "list_workers",
+        "description": "View all current workers and their status (idle, working, done).",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -31,86 +28,63 @@ MASTER_TOOLS = [
         },
     },
     {
-        "name": "get_agent_detail",
-        "description": "Get detailed information about a specific worker agent.",
+        "name": "spawn_worker",
+        "description": "Create a new worker of the specified type.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "agent_id": {
+                "worker_type": {
                     "type": "string",
-                    "description": "The ID of the agent to inspect.",
+                    "description": "Type of worker to spawn (e.g., 'general', 'coder', 'researcher').",
                 },
             },
-            "required": ["agent_id"],
-        },
-    },
-    {
-        "name": "spawn_agent",
-        "description": "Create a new worker agent instance from a template.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "template_name": {
-                    "type": "string",
-                    "description": "Name of the agent template to use (e.g., 'general', 'researcher', 'coder').",
-                },
-            },
-            "required": ["template_name"],
+            "required": ["worker_type"],
         },
     },
     {
         "name": "delegate",
-        "description": "Assign a task to a worker agent. The agent will execute the task and the result will be handled according to the specified intention.",
+        "description": "Assign a task to a worker. The worker will run in the background. Use get_completed to check results.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "agent_id": {
+                "worker_id": {
                     "type": "string",
-                    "description": "The ID of the worker agent to delegate to.",
+                    "description": "ID of the worker to delegate to.",
                 },
                 "task": {
                     "type": "string",
-                    "description": "The task description/prompt for the agent.",
+                    "description": "The task description for the worker.",
                 },
                 "intention": {
                     "type": "string",
-                    "enum": ["return_to_user", "pass_to_agent", "review_by_master"],
-                    "description": "What to do when the task completes.",
-                },
-                "output_path": {
-                    "type": "string",
-                    "description": "Optional workspace path to write results to.",
+                    "enum": ["return_to_user", "review_by_master"],
+                    "description": "What to do when the worker completes.",
                 },
             },
-            "required": ["agent_id", "task", "intention"],
+            "required": ["worker_id", "task", "intention"],
         },
     },
     {
-        "name": "terminate_agent",
-        "description": "Shut down a worker agent instance.",
+        "name": "get_completed",
+        "description": "Check if any workers have completed their tasks and get their results.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "agent_id": {
-                    "type": "string",
-                    "description": "The ID of the agent to terminate.",
-                },
-            },
-            "required": ["agent_id"],
+            "properties": {},
+            "required": [],
         },
     },
     {
-        "name": "clear_agent_context",
-        "description": "Reset a worker agent's conversation history while keeping it running.",
+        "name": "terminate_worker",
+        "description": "Shut down a worker.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "agent_id": {
+                "worker_id": {
                     "type": "string",
-                    "description": "The ID of the agent to clear.",
+                    "description": "ID of the worker to terminate.",
                 },
             },
-            "required": ["agent_id"],
+            "required": ["worker_id"],
         },
     },
 ]
@@ -123,14 +97,14 @@ class ToolExecutor:
         self,
         state_manager: StateManager,
         event_bus: EventBus,
-        worker_runner: Any = None,  # Will be set to WorkerRunner
+        worker_runner: Any = None,
     ):
         self.state = state_manager
         self.events = event_bus
         self.worker_runner = worker_runner
 
     def execute(self, tool_name: str, tool_input: dict[str, Any]) -> str:
-        """Execute a tool and return the result as a string."""
+        """Execute a tool and return the result."""
         self.events.master_tool_call(tool_name, tool_input)
 
         handler = getattr(self, f"_tool_{tool_name}", None)
@@ -142,102 +116,85 @@ class ToolExecutor:
         self.events.master_tool_result(tool_name, result)
         return result
 
-    def _tool_list_agent_types(self) -> str:
-        templates = self.state.list_agent_types()
-        if not templates:
-            return "No agent templates available."
+    def _tool_list_worker_types(self) -> str:
+        configs = self.state.list_worker_types()
+        if not configs:
+            return "No worker types available."
 
-        lines = ["Available agent templates:"]
-        for name, config in templates.items():
+        lines = ["Available worker types:"]
+        for name, config in configs.items():
             lines.append(f"\n- {name}: {config.description}")
-            lines.append(f"  Tools: {', '.join(config.tools)}")
         return "\n".join(lines)
 
-    def _tool_list_running_agents(self) -> str:
-        agents = self.state.list_running_agents()
-        if not agents:
-            return "No agents currently running."
+    def _tool_list_workers(self) -> str:
+        workers = self.state.list_workers()
+        if not workers:
+            return "No workers running."
 
-        lines = ["Running agents:"]
-        for agent_id, agent in agents.items():
-            lines.append(f"\n- {agent_id} ({agent.config.name})")
-            lines.append(f"  Status: {agent.status.value}")
-            lines.append(f"  Messages: {len(agent.conversation)}")
+        lines = ["Current workers:"]
+        for worker_id, worker in workers.items():
+            lines.append(f"\n- {worker_id} ({worker.type}): {worker.status.value}")
+            if worker.current_task:
+                lines.append(f"  Task: {worker.current_task[:50]}...")
+            if worker.result:
+                lines.append(f"  Result available: yes")
         return "\n".join(lines)
 
-    def _tool_get_agent_detail(self, agent_id: str) -> str:
-        agent = self.state.get_agent(agent_id)
-        if not agent:
-            return f"Agent not found: {agent_id}"
-
-        lines = [
-            f"Agent: {agent_id}",
-            f"Type: {agent.config.name}",
-            f"Status: {agent.status.value}",
-            f"Created: {agent.created_at.isoformat()}",
-            f"Messages in context: {len(agent.conversation)}",
-            f"Tools: {', '.join(agent.config.tools)}",
-        ]
-        if agent.last_result:
-            lines.append(f"Last result: {agent.last_result[:200]}...")
-        return "\n".join(lines)
-
-    def _tool_spawn_agent(self, template_name: str) -> str:
+    def _tool_spawn_worker(self, worker_type: str) -> str:
         try:
-            agent = self.state.spawn_agent(template_name=template_name)
-            self.events.worker_spawned(agent.id, agent.config.name)
-            return f"Spawned agent '{agent.config.name}' with ID: {agent.id}"
+            worker = self.state.spawn_worker(worker_type)
+            self.events.worker_spawned(worker.id, worker.type)
+            return f"Spawned {worker_type} worker with ID: {worker.id}"
         except ValueError as e:
-            return f"Failed to spawn agent: {e}"
+            return f"Failed to spawn worker: {e}"
 
     def _tool_delegate(
         self,
-        agent_id: str,
+        worker_id: str,
         task: str,
         intention: str,
-        output_path: str | None = None,
     ) -> str:
-        agent = self.state.get_agent(agent_id)
-        if not agent:
-            return f"Agent not found: {agent_id}"
+        worker = self.state.get_worker(worker_id)
+        if not worker:
+            return f"Worker not found: {worker_id}"
+
+        if worker.status.value == "working":
+            return f"Worker {worker_id} is already busy."
 
         # Parse intention
-        intention_type = IntentionType(intention)
-        intention_obj = Intention(type=intention_type)
+        try:
+            intention_enum = Intention(intention)
+        except ValueError:
+            return f"Invalid intention: {intention}"
 
-        # Create delegation record
-        delegation = self.state.create_delegation(
-            agent_id=agent_id,
-            task=task,
-            intention=intention_obj,
-            output_path=output_path,
-        )
+        # Assign the task
+        self.state.assign_task(worker_id, task, intention_enum)
 
-        self.events.delegation_started(delegation.id, agent_id, task)
-
-        # Execute the delegation synchronously using the worker runner
+        # Start the worker in the background
         if self.worker_runner:
-            result = self.worker_runner.run(agent, task)
-            self.state.set_agent_result(agent_id, result)
-            self.state.complete_delegation(delegation.id, result)
-            self.events.delegation_completed(delegation.id, agent_id, result)
-
-            # Handle intention
-            if intention_type == IntentionType.RETURN_TO_USER:
-                return f"Delegation complete. Result from {agent_id}:\n\n{result}"
-            elif intention_type == IntentionType.REVIEW_BY_MASTER:
-                return f"Delegation complete. Review the result and decide next steps:\n\n{result}"
-            else:
-                return f"Delegation complete with result:\n\n{result}"
+            self.worker_runner.start_worker(worker_id, task)
+            return f"Delegated task to worker {worker_id}. Use get_completed to check when done."
         else:
-            return f"Delegation created (ID: {delegation.id}) but no worker runner configured."
+            return f"Task assigned to {worker_id} but no worker runner configured."
 
-    def _tool_terminate_agent(self, agent_id: str) -> str:
-        if self.state.terminate_agent(agent_id):
-            return f"Agent {agent_id} terminated."
-        return f"Agent not found: {agent_id}"
+    def _tool_get_completed(self) -> str:
+        completed = self.state.get_completed_workers()
+        if not completed:
+            return "No completed tasks."
 
-    def _tool_clear_agent_context(self, agent_id: str) -> str:
-        if self.state.clear_agent_context(agent_id):
-            return f"Agent {agent_id} context cleared."
-        return f"Agent not found: {agent_id}"
+        lines = ["Completed tasks:"]
+        for worker in completed:
+            lines.append(f"\n- Worker {worker.id} ({worker.type}):")
+            lines.append(f"  Task: {worker.current_task}")
+            lines.append(f"  Intention: {worker.intention.value if worker.intention else 'none'}")
+            lines.append(f"  Result: {worker.result}")
+
+            # Clear the worker so it can be reused
+            self.state.clear_worker(worker.id)
+
+        return "\n".join(lines)
+
+    def _tool_terminate_worker(self, worker_id: str) -> str:
+        if self.state.terminate_worker(worker_id):
+            return f"Worker {worker_id} terminated."
+        return f"Worker not found: {worker_id}"

@@ -1,27 +1,23 @@
 """Shared types and utilities."""
 
 from .types import (
-    AgentStatus,
-    IntentionType,
+    WorkerStatus,
+    MasterStatus,
     Intention,
-    Message,
-    ToolCall,
-    AgentConfig,
-    WorkerAgent,
-    Delegation,
+    WorkerConfig,
+    Worker,
+    MasterState,
     FederationState,
 )
 from .events import Event, EventType, EventBus, console_event_handler
 
 __all__ = [
-    "AgentStatus",
-    "IntentionType",
+    "WorkerStatus",
+    "MasterStatus",
     "Intention",
-    "Message",
-    "ToolCall",
-    "AgentConfig",
-    "WorkerAgent",
-    "Delegation",
+    "WorkerConfig",
+    "Worker",
+    "MasterState",
     "FederationState",
     "Event",
     "EventType",

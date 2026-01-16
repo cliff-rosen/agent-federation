@@ -3,6 +3,7 @@
 import anthropic
 
 from ..shared.events import EventBus, EventType, Event
+from ..shared.types import MasterStatus
 from .state import StateManager
 from .tools import MASTER_TOOLS, ToolExecutor
 
@@ -11,25 +12,27 @@ MASTER_SYSTEM_PROMPT = """You are the Master Agent in an agent federation system
 
 Your role is to:
 1. Receive and interpret user requests
-2. Decide whether to handle tasks directly or delegate to specialized worker agents
-3. Manage worker agent lifecycle (spawn, delegate, terminate)
-4. Coordinate complex workflows across multiple agents
-5. Ensure work products are delivered back to the user
+2. Decide whether to handle tasks directly or delegate to worker agents
+3. Manage worker lifecycle (spawn, delegate, terminate)
+4. Check for completed work and deliver results to users
 
-Available worker agent types can be discovered using list_agent_types.
+Available tools:
+- list_worker_types: See what types of workers you can create
+- spawn_worker: Create a new worker
+- delegate: Assign a task to a worker (runs in background)
+- get_completed: Check for finished work and get results
+- list_workers: See all workers and their status
+- terminate_worker: Shut down a worker
 
-When delegating:
-- Spawn an appropriate agent type for the task
-- Use the delegate tool to assign work
-- The intention parameter determines what happens when the agent completes:
-  - "return_to_user": The result goes directly to the user
-  - "review_by_master": You review the result and decide next steps
-  - "pass_to_agent": Forward to another agent (for pipelines)
+Workflow for delegation:
+1. Spawn a worker of the appropriate type
+2. Delegate the task with an intention (return_to_user or review_by_master)
+3. The worker runs in the background
+4. Call get_completed to check results
+5. Handle based on the intention
 
-For simple questions or tasks, you can handle them directly.
-For complex tasks, delegate to specialized workers.
-
-Always be clear about what you're doing and why."""
+For simple questions, handle them directly without delegation.
+For complex tasks, delegate to specialized workers."""
 
 
 class MasterAgent:
@@ -56,13 +59,12 @@ class MasterAgent:
 
     def run(self, user_message: str) -> str:
         """Run the agentic loop for a user message. Returns final response."""
-        # Add user message to conversation
+        self.state_manager.set_master_status(MasterStatus.THINKING)
         self.conversation.append({"role": "user", "content": user_message})
 
         final_response = ""
 
         while True:
-            # Call LLM with streaming
             response_text, tool_calls = self._call_llm_streaming()
 
             if tool_calls:
@@ -80,9 +82,10 @@ class MasterAgent:
 
                 self.conversation.append({"role": "assistant", "content": assistant_content})
 
-                # Execute tools and collect results
+                # Execute tools
                 tool_results = []
                 for tc in tool_calls:
+                    self.state_manager.set_master_status(MasterStatus.CALLING_TOOL, tc["name"])
                     result = self.tool_executor.execute(tc["name"], tc["input"])
                     tool_results.append({
                         "type": "tool_result",
@@ -91,13 +94,12 @@ class MasterAgent:
                     })
 
                 self.conversation.append({"role": "user", "content": tool_results})
-
-                # Continue loop
+                self.state_manager.set_master_status(MasterStatus.THINKING)
             else:
-                # No tool calls - we have the final response
                 final_response = response_text
                 if response_text:
                     self.conversation.append({"role": "assistant", "content": response_text})
+                self.state_manager.set_master_status(MasterStatus.IDLE)
                 self.event_bus.emit(Event.create(EventType.MASTER_DONE))
                 break
 
@@ -118,15 +120,14 @@ class MasterAgent:
         ) as stream:
             for event in stream:
                 if event.type == "content_block_start":
-                    if event.content_block.type == "text":
-                        pass  # Text block starting
-                    elif event.content_block.type == "tool_use":
-                        current_tool_call = {
-                            "id": event.content_block.id,
-                            "name": event.content_block.name,
-                            "input": {},
-                            "_input_json": "",
-                        }
+                    if hasattr(event.content_block, "type"):
+                        if event.content_block.type == "tool_use":
+                            current_tool_call = {
+                                "id": event.content_block.id,
+                                "name": event.content_block.name,
+                                "input": {},
+                                "_input_json": "",
+                            }
 
                 elif event.type == "content_block_delta":
                     if hasattr(event.delta, "text"):
@@ -139,7 +140,6 @@ class MasterAgent:
 
                 elif event.type == "content_block_stop":
                     if current_tool_call:
-                        # Parse the accumulated JSON
                         import json
                         try:
                             current_tool_call["input"] = json.loads(

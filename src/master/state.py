@@ -1,16 +1,15 @@
-"""State management for the master agent."""
+"""State management for the federation."""
 
 import uuid
-from datetime import datetime
 
 from ..shared.types import (
     FederationState,
-    WorkerAgent,
-    AgentConfig,
-    AgentStatus,
-    Delegation,
+    Worker,
+    WorkerConfig,
+    WorkerStatus,
+    MasterState,
+    MasterStatus,
     Intention,
-    Message,
 )
 
 
@@ -19,137 +18,150 @@ class StateManager:
 
     def __init__(self, workspace_path: str = "./workspace"):
         self.state = FederationState(workspace_path=workspace_path)
-        self._load_default_templates()
+        self._load_default_configs()
 
-    def _load_default_templates(self) -> None:
-        """Load default agent templates."""
-        # A simple general-purpose worker for testing
-        self.state.agent_templates["general"] = AgentConfig(
+    def _load_default_configs(self) -> None:
+        """Load default worker configurations."""
+        self.state.worker_configs["general"] = WorkerConfig(
             name="general",
-            description="A general-purpose worker agent that can handle various tasks.",
-            system_prompt="""You are a helpful worker agent in a federation system.
-You receive tasks from the master agent and complete them thoroughly.
-Always provide clear, complete responses.
-If you need to write files, use the workspace directory.""",
-            tools=["read_file", "write_file", "search_files"],
+            description="A general-purpose worker that can handle various tasks.",
+            system_prompt="You are a helpful worker agent. Complete tasks thoroughly and clearly.",
+            allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
         )
 
-        # A research agent
-        self.state.agent_templates["researcher"] = AgentConfig(
-            name="researcher",
-            description="A research agent that gathers and synthesizes information.",
-            system_prompt="""You are a research agent. Your job is to gather information,
-analyze it, and provide comprehensive summaries. Be thorough and cite sources when possible.""",
-            tools=["read_file", "search_files", "web_search"],
-        )
-
-        # A coder agent
-        self.state.agent_templates["coder"] = AgentConfig(
+        self.state.worker_configs["coder"] = WorkerConfig(
             name="coder",
-            description="A coding agent that writes and modifies code.",
-            system_prompt="""You are a coding agent. You write clean, well-structured code.
-Follow best practices and include appropriate error handling.""",
-            tools=["read_file", "write_file", "search_files", "run_command"],
+            description="A coding specialist for writing and modifying code.",
+            system_prompt="You are a coding agent. Write clean, well-structured code with good error handling.",
+            allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
         )
 
-    def list_agent_types(self) -> dict[str, AgentConfig]:
-        """Get all available agent templates."""
-        return self.state.agent_templates
+        self.state.worker_configs["researcher"] = WorkerConfig(
+            name="researcher",
+            description="A research agent for gathering and analyzing information.",
+            system_prompt="You are a research agent. Gather information thoroughly and provide clear summaries.",
+            allowed_tools=["Read", "Glob", "Grep", "WebFetch", "WebSearch"],
+        )
 
-    def list_running_agents(self) -> dict[str, WorkerAgent]:
-        """Get all running worker agents."""
+    # --- Master state ---
+
+    def set_master_status(self, status: MasterStatus, tool: str | None = None) -> None:
+        """Update master agent status."""
+        self.state.master.status = status
+        self.state.master.current_tool = tool
+
+    def get_master_state(self) -> MasterState:
+        """Get current master state."""
+        return self.state.master
+
+    # --- Worker configs ---
+
+    def list_worker_types(self) -> dict[str, WorkerConfig]:
+        """Get all available worker configurations."""
+        return self.state.worker_configs
+
+    # --- Workers ---
+
+    def list_workers(self) -> dict[str, Worker]:
+        """Get all workers."""
         return self.state.workers
 
-    def get_agent(self, agent_id: str) -> WorkerAgent | None:
-        """Get a specific worker agent."""
-        return self.state.workers.get(agent_id)
+    def get_worker(self, worker_id: str) -> Worker | None:
+        """Get a specific worker."""
+        return self.state.workers.get(worker_id)
 
-    def spawn_agent(
-        self,
-        template_name: str | None = None,
-        custom_config: AgentConfig | None = None,
-    ) -> WorkerAgent:
-        """Spawn a new worker agent from template or custom config."""
-        if template_name:
-            if template_name not in self.state.agent_templates:
-                raise ValueError(f"Unknown agent template: {template_name}")
-            config = self.state.agent_templates[template_name]
-        elif custom_config:
-            config = custom_config
-        else:
-            raise ValueError("Must provide either template_name or custom_config")
+    def spawn_worker(self, worker_type: str) -> Worker:
+        """Spawn a new worker of the given type."""
+        if worker_type not in self.state.worker_configs:
+            raise ValueError(f"Unknown worker type: {worker_type}")
 
-        agent_id = str(uuid.uuid4())[:8]
-        agent = WorkerAgent(id=agent_id, config=config)
-        self.state.workers[agent_id] = agent
-        return agent
+        config = self.state.worker_configs[worker_type]
+        worker_id = str(uuid.uuid4())[:8]
 
-    def terminate_agent(self, agent_id: str) -> bool:
-        """Terminate a worker agent."""
-        if agent_id in self.state.workers:
-            del self.state.workers[agent_id]
+        worker = Worker(
+            id=worker_id,
+            type=worker_type,
+            config=config,
+        )
+        self.state.workers[worker_id] = worker
+        return worker
+
+    def terminate_worker(self, worker_id: str) -> bool:
+        """Terminate a worker."""
+        if worker_id in self.state.workers:
+            del self.state.workers[worker_id]
+            # Also remove from completed queue if present
+            if worker_id in self.state.completed_queue:
+                self.state.completed_queue.remove(worker_id)
             return True
         return False
 
-    def clear_agent_context(self, agent_id: str) -> bool:
-        """Clear a worker agent's conversation history."""
-        agent = self.state.workers.get(agent_id)
-        if agent:
-            agent.conversation = []
-            agent.status = AgentStatus.IDLE
-            return True
-        return False
+    # --- Task assignment ---
 
-    def update_agent_status(self, agent_id: str, status: AgentStatus) -> None:
-        """Update a worker agent's status."""
-        agent = self.state.workers.get(agent_id)
-        if agent:
-            agent.status = status
-
-    def add_agent_message(self, agent_id: str, message: Message) -> None:
-        """Add a message to a worker agent's conversation."""
-        agent = self.state.workers.get(agent_id)
-        if agent:
-            agent.conversation.append(message)
-
-    def set_agent_result(self, agent_id: str, result: str) -> None:
-        """Set the result of a worker agent's last task."""
-        agent = self.state.workers.get(agent_id)
-        if agent:
-            agent.last_result = result
-            agent.status = AgentStatus.HAS_RESULT
-
-    def create_delegation(
+    def assign_task(
         self,
-        agent_id: str,
+        worker_id: str,
         task: str,
         intention: Intention,
-        output_path: str | None = None,
-    ) -> Delegation:
-        """Create a new delegation."""
-        delegation_id = str(uuid.uuid4())[:8]
-        delegation = Delegation(
-            id=delegation_id,
-            agent_id=agent_id,
-            task=task,
-            output_path=output_path,
-            intention=intention,
-        )
-        self.state.delegations[delegation_id] = delegation
-        return delegation
+    ) -> bool:
+        """Assign a task to a worker."""
+        worker = self.state.workers.get(worker_id)
+        if not worker:
+            return False
 
-    def complete_delegation(self, delegation_id: str, result: str) -> Delegation | None:
-        """Mark a delegation as complete."""
-        delegation = self.state.delegations.get(delegation_id)
-        if delegation:
-            delegation.completed_at = datetime.now()
-            delegation.result = result
-        return delegation
+        worker.status = WorkerStatus.WORKING
+        worker.current_task = task
+        worker.intention = intention
+        worker.result = None
+        return True
 
-    def get_pending_delegations(self) -> list[Delegation]:
-        """Get all incomplete delegations."""
-        return [d for d in self.state.delegations.values() if d.completed_at is None]
+    def complete_task(self, worker_id: str, result: str) -> bool:
+        """Mark a worker's task as complete."""
+        worker = self.state.workers.get(worker_id)
+        if not worker:
+            return False
 
-    def get_completed_delegations(self) -> list[Delegation]:
-        """Get all completed delegations."""
-        return [d for d in self.state.delegations.values() if d.completed_at is not None]
+        worker.status = WorkerStatus.DONE
+        worker.result = result
+
+        # Add to completed queue for master to pick up
+        if worker_id not in self.state.completed_queue:
+            self.state.completed_queue.append(worker_id)
+
+        return True
+
+    def clear_worker(self, worker_id: str) -> bool:
+        """Reset a worker to idle state."""
+        worker = self.state.workers.get(worker_id)
+        if not worker:
+            return False
+
+        worker.status = WorkerStatus.IDLE
+        worker.current_task = None
+        worker.intention = None
+        worker.result = None
+
+        # Remove from completed queue if present
+        if worker_id in self.state.completed_queue:
+            self.state.completed_queue.remove(worker_id)
+
+        return True
+
+    # --- Completion queue ---
+
+    def get_completed_workers(self) -> list[Worker]:
+        """Get workers that have completed their tasks."""
+        return [
+            self.state.workers[wid]
+            for wid in self.state.completed_queue
+            if wid in self.state.workers
+        ]
+
+    def pop_completed(self) -> Worker | None:
+        """Pop the next completed worker from the queue."""
+        while self.state.completed_queue:
+            worker_id = self.state.completed_queue.pop(0)
+            worker = self.state.workers.get(worker_id)
+            if worker and worker.status == WorkerStatus.DONE:
+                return worker
+        return None

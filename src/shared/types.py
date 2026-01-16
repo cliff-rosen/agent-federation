@@ -2,83 +2,64 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
 from datetime import datetime
 
 
-class AgentStatus(Enum):
+class WorkerStatus(Enum):
     IDLE = "idle"
-    BUSY = "busy"
-    HAS_RESULT = "has_result"
+    WORKING = "working"
+    DONE = "done"
 
 
-class IntentionType(Enum):
+class MasterStatus(Enum):
+    IDLE = "idle"
+    THINKING = "thinking"
+    CALLING_TOOL = "calling_tool"
+
+
+class Intention(Enum):
+    """What to do when a worker completes."""
     RETURN_TO_USER = "return_to_user"
-    PASS_TO_AGENT = "pass_to_agent"
     REVIEW_BY_MASTER = "review_by_master"
 
 
 @dataclass
-class Intention:
-    """What should happen when a delegation completes."""
-    type: IntentionType
-    target_agent_id: str | None = None  # For PASS_TO_AGENT
-    transform_instructions: str | None = None  # For PASS_TO_AGENT
-
-
-@dataclass
-class Message:
-    """A message in a conversation."""
-    role: str  # "user", "assistant", "tool_result"
-    content: Any
-    tool_use_id: str | None = None  # For tool results
-
-
-@dataclass
-class ToolCall:
-    """A tool call from the LLM."""
-    id: str
-    name: str
-    input: dict[str, Any]
-
-
-@dataclass
-class AgentConfig:
-    """Configuration for an agent (from template or custom)."""
+class WorkerConfig:
+    """Configuration for a worker type."""
     name: str
     description: str
     system_prompt: str
-    tools: list[str]  # Tool names this agent can use
+    allowed_tools: list[str]
 
 
 @dataclass
-class WorkerAgent:
-    """A running worker agent instance."""
+class Worker:
+    """A worker agent in the federation."""
     id: str
-    config: AgentConfig
-    conversation: list[Message] = field(default_factory=list)
-    status: AgentStatus = AgentStatus.IDLE
-    last_result: str | None = None
-    created_at: datetime = field(default_factory=datetime.now)
+    type: str  # e.g., "general", "coder"
+    config: WorkerConfig
+    status: WorkerStatus = WorkerStatus.IDLE
 
-
-@dataclass
-class Delegation:
-    """An active delegation to a worker agent."""
-    id: str
-    agent_id: str
-    task: str
-    output_path: str | None
-    intention: Intention
-    created_at: datetime = field(default_factory=datetime.now)
-    completed_at: datetime | None = None
+    # Current task info (when working or done)
+    current_task: str | None = None
+    intention: Intention | None = None
     result: str | None = None
+
+    created_at: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
+class MasterState:
+    """Current state of the master agent."""
+    status: MasterStatus = MasterStatus.IDLE
+    current_tool: str | None = None
 
 
 @dataclass
 class FederationState:
     """Global state of the federation."""
-    workers: dict[str, WorkerAgent] = field(default_factory=dict)
-    delegations: dict[str, Delegation] = field(default_factory=dict)
-    agent_templates: dict[str, AgentConfig] = field(default_factory=dict)
+    master: MasterState = field(default_factory=MasterState)
+    workers: dict[str, Worker] = field(default_factory=dict)
+    worker_configs: dict[str, WorkerConfig] = field(default_factory=dict)
+    completed_queue: list[str] = field(default_factory=list)  # Worker IDs with results ready
     workspace_path: str = "./workspace"
