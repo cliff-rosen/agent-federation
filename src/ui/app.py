@@ -67,22 +67,22 @@ class WorkerItem(ListItem):
 class WorkersPanel(Static):
     """Panel showing all workers - click to select."""
 
-    workers: reactive[dict] = reactive({}, always_update=True)
+    worker_data: reactive[dict] = reactive({}, always_update=True)
     selected_id: reactive[str | None] = reactive(None)
 
     def compose(self) -> ComposeResult:
         yield ListView(id="workers-list")
 
-    def watch_workers(self, workers: dict) -> None:
+    def watch_worker_data(self, worker_data: dict) -> None:
         """Update the list when workers change."""
         list_view = self.query_one("#workers-list", ListView)
         list_view.clear()
 
-        if not workers:
+        if not worker_data:
             list_view.append(ListItem(Label("No workers", classes="dim")))
             return
 
-        for worker_id, worker in workers.items():
+        for worker_id, worker in worker_data.items():
             item = WorkerItem(worker_id, worker)
             if worker_id == self.selected_id:
                 item.highlighted = True
@@ -103,31 +103,44 @@ class WorkerOutputPanel(Static):
     def compose(self) -> ComposeResult:
         yield RichLog(id="worker-output", highlight=True, markup=True)
 
-    def on_mount(self) -> None:
-        self.log = self.query_one("#worker-output", RichLog)
+    @property
+    def log(self) -> RichLog:
+        return self.query_one("#worker-output", RichLog)
 
     def set_worker(self, worker_id: str | None, worker=None) -> None:
         """Set the worker to display."""
         self.worker_id = worker_id
-        self.log.clear()
-        if worker_id and worker:
-            self.log.write(Text(f"Worker: {worker.type}-{worker_id[:4]}", style="bold"))
-            if worker.current_task:
-                self.log.write(Text(f"Task: {worker.current_task}", style="dim"))
-            self.log.write(Text("─" * 30, style="dim"))
+        try:
+            self.log.clear()
+            if worker_id and worker:
+                self.log.write(Text(f"Worker: {worker.type}-{worker_id[:4]}", style="bold"))
+                if worker.current_task:
+                    self.log.write(Text(f"Task: {worker.current_task}", style="dim"))
+                self.log.write(Text("─" * 30, style="dim"))
+        except Exception:
+            pass  # Widget not ready yet
 
     def add_text(self, text: str) -> None:
         """Add streaming text."""
-        self.log.write(Text(text, style="white"))
+        try:
+            self.log.write(Text(text, style="white"))
+        except Exception:
+            pass
 
     def add_tool_call(self, tool_name: str) -> None:
         """Add tool call."""
-        self.log.write(Text(f"[{tool_name}]", style="cyan"))
+        try:
+            self.log.write(Text(f"[{tool_name}]", style="cyan"))
+        except Exception:
+            pass
 
     def add_done(self, result: str) -> None:
         """Mark complete."""
-        self.log.write(Text("─" * 30, style="dim"))
-        self.log.write(Text("Done", style="green bold"))
+        try:
+            self.log.write(Text("─" * 30, style="dim"))
+            self.log.write(Text("Done", style="green bold"))
+        except Exception:
+            pass
 
 
 class ChatLog(RichLog):
@@ -378,7 +391,7 @@ class FederationApp(App):
 
     def _refresh_workers(self) -> None:
         """Refresh the workers panel."""
-        self.workers_panel.workers = dict(self.state_manager.state.workers)
+        self.workers_panel.worker_data = dict(self.state_manager.state.workers)
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle user input."""
