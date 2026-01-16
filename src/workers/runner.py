@@ -2,10 +2,17 @@
 
 import asyncio
 import threading
-from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions, AssistantMessage, TextBlock, ResultMessage
+import traceback
 
 from ..shared.events import EventBus
 from ..master.state import StateManager
+
+# Try to import Claude Agent SDK, fall back to simple mode if not available
+try:
+    from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions, AssistantMessage, TextBlock, ResultMessage
+    HAS_SDK = True
+except ImportError:
+    HAS_SDK = False
 
 
 class WorkerRunner:
@@ -57,8 +64,23 @@ class WorkerRunner:
         """Run a worker using Claude Agent SDK."""
         # Emit started event so UI can refresh
         self.events.worker_started(worker_id, task)
+        self.events.worker_text(worker_id, f"Starting task: {task}\n")
 
         try:
+            if not HAS_SDK:
+                # Fallback: simple simulation for testing
+                self.events.worker_text(worker_id, "[SDK not installed - running in test mode]\n")
+                await asyncio.sleep(2)
+                result_text = f"[Test mode] Would have completed task: {task}"
+                self.state.complete_task(worker_id, result_text)
+                self.events.worker_done(worker_id, result_text)
+                return
+
+            self.events.worker_text(worker_id, "Initializing Claude Agent SDK...\n")
+
+            # Assert for type checker - we return early above if HAS_SDK is False
+            assert HAS_SDK
+
             options = ClaudeAgentOptions(
                 system_prompt=system_prompt,
                 allowed_tools=allowed_tools,
@@ -69,6 +91,7 @@ class WorkerRunner:
             result_text = ""
 
             async with ClaudeSDKClient(options=options) as client:
+                self.events.worker_text(worker_id, "Connected. Sending query...\n")
                 await client.query(task)
 
                 async for message in client.receive_response():
@@ -88,7 +111,8 @@ class WorkerRunner:
             self.events.worker_done(worker_id, result_text)
 
         except Exception as e:
-            error_msg = f"Worker error: {e}"
+            error_msg = f"Worker error: {e}\n{traceback.format_exc()}"
+            self.events.worker_text(worker_id, f"\n[ERROR] {error_msg}\n")
             self.state.complete_task(worker_id, error_msg)
             self.events.worker_done(worker_id, error_msg)
 

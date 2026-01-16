@@ -350,12 +350,12 @@ class FederationApp(App):
         elif event.type == EventType.WORKER_SPAWNED:
             self._refresh_workers()
             agent_type = event.data.get("agent_type", "")
-            agent_id = event.data.get("agent_id", "")
+            agent_id = event.agent_id or ""
             self.chat.add_status(f"Spawned {agent_type} worker: {agent_id}")
 
         elif event.type == EventType.WORKER_STARTED:
             self._refresh_workers()
-            agent_id = event.data.get("agent_id", "")
+            agent_id = event.agent_id or ""
             self.chat.add_status(f"Worker {agent_id} started")
             # Auto-select the started worker
             self.selected_worker_id = agent_id
@@ -364,14 +364,14 @@ class FederationApp(App):
             self.worker_output.set_worker(agent_id, worker)
 
         elif event.type == EventType.WORKER_TEXT:
-            agent_id = event.data.get("agent_id", "")
+            agent_id = event.agent_id or ""
             text = event.data.get("text", "")
             # Show in worker output if this worker is selected
             if agent_id == self.selected_worker_id:
                 self.worker_output.add_text(text)
 
         elif event.type == EventType.WORKER_TOOL_CALL:
-            agent_id = event.data.get("agent_id", "")
+            agent_id = event.agent_id or ""
             tool_name = event.data.get("tool_name", "")
             # Show in worker output if this worker is selected
             if agent_id == self.selected_worker_id:
@@ -379,7 +379,7 @@ class FederationApp(App):
 
         elif event.type == EventType.WORKER_DONE:
             self._refresh_workers()
-            agent_id = event.data.get("agent_id", "")
+            agent_id = event.agent_id or ""
             result = event.data.get("result", "")
             self.chat.add_status(f"Worker {agent_id} completed")
             # Update worker output if selected
