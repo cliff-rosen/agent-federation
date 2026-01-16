@@ -391,13 +391,14 @@ class FederationApp(App):
         self.master_panel.status = MasterStatus.THINKING
         self.run_master(message)
 
-    @work(thread=True)
+    @work(thread=True, exclusive=True)
     def run_master(self, message: str) -> None:
         """Run the master agent in a background thread."""
         try:
             self.master.run(message)
         except Exception as e:
             self.call_from_thread(self.chat.add_error, str(e))
+        finally:
             self.call_from_thread(
                 setattr, self.master_panel, "status", MasterStatus.IDLE
             )
@@ -408,4 +409,5 @@ class FederationApp(App):
 
     def action_quit(self) -> None:
         """Quit the app."""
+        self.workers.cancel_all()
         self.exit()
